@@ -15,8 +15,10 @@ import { promises as fs } from 'node:fs';
 import type {
   OpenProjectResult,
   ProjectFile,
+  ReadableProjectFile,
   SaveProjectResult,
 } from './shared/project';
+import { migrateProject } from './shared/migration';
 import type {
   RecordingExportSettings,
   SaveRecordingResult,
@@ -365,13 +367,15 @@ const convertWebmToMp4 = async (
   });
 };
 
-const isProjectFile = (value: unknown): value is ProjectFile => {
+const isProjectFile = (value: unknown): value is ReadableProjectFile => {
   if (!value || typeof value !== 'object') return false;
 
-  const project = value as Partial<ProjectFile>;
+  const project = value as Partial<ReadableProjectFile> & {
+    review?: ProjectFile['review'];
+  };
   return (
     project.format === 'm45' &&
-    project.version === 1 &&
+    (project.version === 1 || project.version === 2) &&
     !!project.canvas &&
     Array.isArray(project.canvas.strokes) &&
     !!project.camera &&
@@ -380,7 +384,11 @@ const isProjectFile = (value: unknown): value is ProjectFile => {
     typeof project.camera.zoom === 'number' &&
     !!project.settings &&
     typeof project.settings.selectedColor === 'string' &&
-    typeof project.settings.selectedWidth === 'number'
+    typeof project.settings.selectedWidth === 'number' &&
+    (project.version === 1 ||
+      (!!project.review &&
+        Array.isArray(project.review.stampDefinitions) &&
+        Array.isArray(project.review.placedStamps)))
   );
 };
 
@@ -473,7 +481,7 @@ ipcMain.handle('project:open', async (): Promise<OpenProjectResult> => {
   return {
     canceled: false,
     filePath,
-    project: parsed,
+    project: migrateProject(parsed),
   };
 });
 
