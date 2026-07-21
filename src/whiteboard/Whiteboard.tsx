@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type {
   Camera,
+  CanvasBackgroundColor,
+  CanvasBackgroundPattern,
   LayerDefinition,
   PlacedStamp,
   Point,
@@ -18,7 +20,7 @@ import {
 } from '../recording/RecordingManager';
 import { createDefaultReviewData } from '../shared/migration';
 import { ReviewPanel } from '../review/ReviewPanel';
-import { calculateMichikusa, calculatePercentages } from '../review/analysis';
+import { calculateMichikusa, calculateMichikusaScore, calculatePercentages } from '../review/analysis';
 import { LayerPanel } from '../layers/LayerPanel';
 
 const MIN_ZOOM = 0.15;
@@ -29,6 +31,15 @@ const ERASER_RADIUS_SCREEN = 18;
 const MIN_POINT_DISTANCE_SCREEN = 0.45;
 const SMOOTHING_DISTANCE_SCREEN = 18;
 const DEFAULT_LAYER_ID = 'layer-1';
+const DEFAULT_STAMP_SIZE = 50;
+const DEFAULT_BACKGROUND_COLOR: CanvasBackgroundColor = 'white';
+const DEFAULT_BACKGROUND_PATTERN: CanvasBackgroundPattern = 'plain';
+const DEFAULT_BACKGROUND_SPACING = 32;
+const MIN_BACKGROUND_SPACING = 8;
+const MAX_BACKGROUND_SPACING = 96;
+const WRAP_NOTE_INSET = 44;
+const WRAP_NOTE_TOP = 414;
+const WRAP_NOTE_BOTTOM = 32;
 
 const createDefaultLayers = (): LayerDefinition[] => [
   { id: DEFAULT_LAYER_ID, name: 'レイヤー1', visible: true, order: 0 },
@@ -38,6 +49,8 @@ type RecordingUiSettings = RecordingSettings & {
   showDuration: boolean;
   showAudioMeter: boolean;
 };
+
+type WrapNoteStroke = { points: Array<{ x: number; y: number }>; color: string; width: number };
 
 const WORKSPACE_MODES = [
   { id: 'create', label: '思考' },
@@ -172,6 +185,9 @@ export function Whiteboard(): React.JSX.Element {
   const redoRef = useRef<Stroke[]>([]);
   const activeStrokeRef = useRef<Stroke | null>(null);
   const cameraRef = useRef<Camera>({ x: 0, y: 0, zoom: 1 });
+  const backgroundColorRef = useRef<CanvasBackgroundColor>(DEFAULT_BACKGROUND_COLOR);
+  const backgroundPatternRef = useRef<CanvasBackgroundPattern>(DEFAULT_BACKGROUND_PATTERN);
+  const backgroundSpacingRef = useRef(DEFAULT_BACKGROUND_SPACING);
   const isSpaceDownRef = useRef(false);
   const isPanningRef = useRef(false);
   const isErasingRef = useRef(false);
@@ -183,6 +199,7 @@ export function Whiteboard(): React.JSX.Element {
   const recordingStateRef = useRef<RecordingState>('idle');
   const recordingElapsedRef = useRef(0);
   const reviewRef = useRef<ReviewData>(createDefaultReviewData());
+  const michikusaScoreCacheRef = useRef<{ review: ReviewData; score: number } | undefined>(undefined);
   const reviewUndoRef = useRef<ReviewData[]>([]);
   const reviewRedoRef = useRef<ReviewData[]>([]);
   const workspaceModeRef = useRef<WorkspaceMode>('create');
@@ -192,6 +209,9 @@ export function Whiteboard(): React.JSX.Element {
   const layersRef = useRef<LayerDefinition[]>(createDefaultLayers());
   const activeLayerIdRef = useRef(DEFAULT_LAYER_ID);
   const showReviewSummaryRef = useRef(false);
+  const showWrapSummaryRef = useRef(false);
+  const wrapNoteStrokesRef = useRef<WrapNoteStroke[]>([]);
+  const activeWrapNoteStrokeRef = useRef<WrapNoteStroke | undefined>(undefined);
   const reviewSummaryPositionRef = useRef({ x: 0, y: 0 });
   const reviewSummaryDragRef = useRef<{ pointerX: number; pointerY: number; originX: number; originY: number } | undefined>(undefined);
 
@@ -202,6 +222,9 @@ export function Whiteboard(): React.JSX.Element {
   const [tool, setTool] = useState<Tool>('pen');
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [lineWidth, setLineWidth] = useState(DEFAULT_WIDTH);
+  const [backgroundColor, setBackgroundColor] = useState<CanvasBackgroundColor>(DEFAULT_BACKGROUND_COLOR);
+  const [backgroundPattern, setBackgroundPattern] = useState<CanvasBackgroundPattern>(DEFAULT_BACKGROUND_PATTERN);
+  const [backgroundSpacing, setBackgroundSpacing] = useState(DEFAULT_BACKGROUND_SPACING);
   const [isPanning, setIsPanning] = useState(false);
   const [zoomLabel, setZoomLabel] = useState('100%');
   const [currentPath, setCurrentPath] = useState<string | undefined>();
@@ -226,6 +249,7 @@ export function Whiteboard(): React.JSX.Element {
   const [audioLevel, setAudioLevel] = useState(0);
   const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [showReviewSummary, setShowReviewSummary] = useState(false);
+  const [showWrapSummary, setShowWrapSummary] = useState(false);
   const [reviewSummaryPosition, setReviewSummaryPosition] = useState({ x: 0, y: 0 });
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('create');
   const [review, setReview] = useState<ReviewData>(createDefaultReviewData);
@@ -308,7 +332,9 @@ export function Whiteboard(): React.JSX.Element {
       createdAt: createdAtRef.current,
       updatedAt: now,
       canvas: {
-        background: 'plain',
+        background: backgroundPatternRef.current,
+        backgroundColor: backgroundColorRef.current,
+        backgroundSpacing: backgroundSpacingRef.current,
         strokes: cloneStrokes(strokesRef.current),
         layers,
         activeLayerId,
@@ -363,6 +389,15 @@ export function Whiteboard(): React.JSX.Element {
       redoRef.current = [];
       activeStrokeRef.current = null;
       cameraRef.current = { ...project.camera };
+      const openedBackgroundColor = project.canvas.backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
+      const openedBackgroundPattern = project.canvas.background ?? DEFAULT_BACKGROUND_PATTERN;
+      const openedBackgroundSpacing = clamp(project.canvas.backgroundSpacing ?? DEFAULT_BACKGROUND_SPACING, MIN_BACKGROUND_SPACING, MAX_BACKGROUND_SPACING);
+      backgroundColorRef.current = openedBackgroundColor;
+      backgroundPatternRef.current = openedBackgroundPattern;
+      backgroundSpacingRef.current = openedBackgroundSpacing;
+      setBackgroundColor(openedBackgroundColor);
+      setBackgroundPattern(openedBackgroundPattern);
+      setBackgroundSpacing(openedBackgroundSpacing);
       createdAtRef.current = project.createdAt;
 
       setColor(project.settings.selectedColor);
@@ -397,10 +432,16 @@ export function Whiteboard(): React.JSX.Element {
     redoRef.current = [];
     activeStrokeRef.current = null;
     cameraRef.current = { x: 0, y: 0, zoom: 1 };
+    backgroundColorRef.current = DEFAULT_BACKGROUND_COLOR;
+    backgroundPatternRef.current = DEFAULT_BACKGROUND_PATTERN;
+    backgroundSpacingRef.current = DEFAULT_BACKGROUND_SPACING;
     createdAtRef.current = new Date().toISOString();
 
     setColor(DEFAULT_COLOR);
     setLineWidth(DEFAULT_WIDTH);
+    setBackgroundColor(DEFAULT_BACKGROUND_COLOR);
+    setBackgroundPattern(DEFAULT_BACKGROUND_PATTERN);
+    setBackgroundSpacing(DEFAULT_BACKGROUND_SPACING);
     setZoomLabel('100%');
     setCurrentPath(undefined);
     setIsDirty(false);
@@ -478,6 +519,27 @@ export function Whiteboard(): React.JSX.Element {
     window.dispatchEvent(new CustomEvent('michikusa-redraw'));
   };
 
+  const changeBackground = (
+    nextColor: CanvasBackgroundColor = backgroundColorRef.current,
+    nextPattern: CanvasBackgroundPattern = backgroundPatternRef.current,
+  ): void => {
+    backgroundColorRef.current = nextColor;
+    backgroundPatternRef.current = nextPattern;
+    setBackgroundColor(nextColor);
+    setBackgroundPattern(nextPattern);
+    markDirty();
+    setOpenMenu(null);
+    window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+  };
+
+  const changeBackgroundSpacing = (nextSpacing: number): void => {
+    const normalizedSpacing = clamp(nextSpacing, MIN_BACKGROUND_SPACING, MAX_BACKGROUND_SPACING);
+    backgroundSpacingRef.current = normalizedSpacing;
+    setBackgroundSpacing(normalizedSpacing);
+    markDirty();
+    window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+  };
+
   const updateReview = (updater: (current: ReviewData) => ReviewData): void => {
     const current = reviewRef.current;
     reviewUndoRef.current.push(structuredClone(current));
@@ -493,7 +555,7 @@ export function Whiteboard(): React.JSX.Element {
   const addStampDefinition = (name: string, stampColor: string): void => {
     const definitionId = crypto.randomUUID();
     updateReview((current) => {
-      const inheritedSize = current.stampDefinitions.find((definition) => definition.id === toolbarStampDefinitionId)?.size ?? 20;
+      const inheritedSize = current.stampDefinitions.find((definition) => definition.id === toolbarStampDefinitionId)?.size ?? DEFAULT_STAMP_SIZE;
       const definition: StampDefinition = {
         id: definitionId, name, color: stampColor, kind: 'custom',
         order: Math.max(0, ...current.stampDefinitions.map((item) => item.order)) + 1,
@@ -645,11 +707,7 @@ export function Whiteboard(): React.JSX.Element {
 
       const saveResult = await window.michikusa.saveRecording(
         bytes,
-        `道草45-${stamp}.mp4`,
-        {
-          videoBitsPerSecond: recordingSettings.videoBitsPerSecond,
-          fps: recordingSettings.fps,
-        },
+        `道草45-${stamp}.webm`,
       );
 
       if (saveResult.canceled) {
@@ -842,6 +900,15 @@ export function Whiteboard(): React.JSX.Element {
     const drawReviewOverlay = (): void => {
       const current = reviewRef.current;
       const camera = cameraRef.current;
+      const cachedMichikusaScore = michikusaScoreCacheRef.current;
+      const michikusaScore = cachedMichikusaScore?.review === current
+        ? cachedMichikusaScore.score
+        : calculateMichikusaScore(current.placedStamps
+          .filter((stamp) => current.stampDefinitions.some((definition) => definition.id === stamp.definitionId && definition.kind === 'custom'))
+          .map(({ x, y }) => ({ x, y })));
+      if (cachedMichikusaScore?.review !== current) {
+        michikusaScoreCacheRef.current = { review: current, score: michikusaScore };
+      }
       const drawFarthestPath = (): void => {
         const michikusa = calculateMichikusa(current.stampDefinitions, current.placedStamps);
         if (current.displaySettings.showFarthestPath && michikusa.available) {
@@ -854,36 +921,37 @@ export function Whiteboard(): React.JSX.Element {
           const farthestX = camera.x + farthest.x * camera.zoom;
           const farthestY = camera.y + farthest.y * camera.zoom;
           context.save();
-          context.strokeStyle = '#f97316';
-          context.lineWidth = 4;
-          context.setLineDash([10, 6]);
-          context.shadowColor = 'rgba(249, 115, 22, .45)';
-          context.shadowBlur = 5;
+          context.strokeStyle = '#8B6A45';
+          context.lineWidth = 1.5;
+          context.lineCap = 'round';
+          context.setLineDash([5, 5]);
           context.beginPath();
           context.moveTo(themeX, themeY);
           context.lineTo(farthestX, farthestY);
           context.stroke();
           context.setLineDash([]);
-          context.shadowBlur = 0;
-          context.fillStyle = '#f97316';
+          context.fillStyle = '#F7F3EB';
+          context.strokeStyle = '#8B6A45';
+          context.lineWidth = 1.5;
           for (const point of [{ x: themeX, y: themeY }, { x: farthestX, y: farthestY }]) {
             context.beginPath();
-            context.arc(point.x, point.y, 6, 0, Math.PI * 2);
+            context.arc(point.x, point.y, 3.5, 0, Math.PI * 2);
             context.fill();
+            context.stroke();
           }
           const middleX = (themeX + farthestX) / 2;
           const middleY = (themeY + farthestY) / 2;
-          const valueLabel = `道草値 ${michikusa.value}`;
-          context.font = '700 15px sans-serif';
+          const valueLabel = `道草値  ${michikusaScore}`;
+          context.font = '500 28px "IBM Plex Sans JP", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, sans-serif';
           const labelWidth = context.measureText(valueLabel).width;
-          context.fillStyle = 'rgba(255, 255, 255, .96)';
-          context.strokeStyle = '#f97316';
-          context.lineWidth = 2;
+          context.fillStyle = 'rgba(247, 243, 235, .94)';
+          context.strokeStyle = '#C8B9A8';
+          context.lineWidth = 1;
           context.beginPath();
-          context.roundRect(middleX - labelWidth / 2 - 9, middleY - 15, labelWidth + 18, 30, 8);
+          context.roundRect(middleX - labelWidth / 2 - 16, middleY - 27, labelWidth + 32, 54, 6);
           context.fill();
           context.stroke();
-          context.fillStyle = '#9a3412';
+          context.fillStyle = '#5D4633';
           context.textAlign = 'center';
           context.textBaseline = 'middle';
           context.fillText(valueLabel, middleX, middleY);
@@ -895,36 +963,35 @@ export function Whiteboard(): React.JSX.Element {
       const drawSummaryOverlay = (): void => {
         if (!showReviewSummaryRef.current) return;
         const percentages = calculatePercentages(current.stampDefinitions, current.placedStamps).filter((item) => item.count > 0);
-        const michikusa = calculateMichikusa(current.stampDefinitions, current.placedStamps);
         const panelWidth = Math.min(560, canvas.clientWidth - 32);
         const panelHeight = Math.min(Math.max(400, 255 + percentages.length * 30), canvas.clientHeight - 32);
         const position = reviewSummaryPositionRef.current;
         const panelX = canvas.clientWidth / 2 - panelWidth / 2 + position.x;
         const panelY = canvas.clientHeight / 2 - panelHeight / 2 + position.y;
         context.save();
-        context.shadowColor = 'rgba(0,0,0,.25)';
+        context.shadowColor = 'rgba(31,46,74,.12)';
         context.shadowBlur = 18;
-        context.fillStyle = '#ffffff';
-        context.strokeStyle = '#9ca3af';
-        context.lineWidth = 1.5;
+        context.fillStyle = '#F7F3EB';
+        context.strokeStyle = '#D8D5CE';
+        context.lineWidth = 1;
         context.beginPath();
         context.roundRect(panelX, panelY, panelWidth, panelHeight, 14);
         context.fill();
         context.shadowBlur = 0;
         context.stroke();
-        context.fillStyle = '#111827';
+        context.fillStyle = '#202733';
         context.textAlign = 'left';
         context.textBaseline = 'alphabetic';
-        context.font = '700 32px sans-serif';
-        context.fillText('今回のまとめ', panelX + 26, panelY + 48);
-        context.fillStyle = '#ffffff';
-        context.strokeStyle = '#9ca3af';
+        context.font = '600 30px "IBM Plex Sans JP", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, sans-serif';
+        context.fillText('集計', panelX + 26, panelY + 48);
+        context.fillStyle = '#F7F3EB';
+        context.strokeStyle = '#D8D5CE';
         context.lineWidth = 1.5;
         context.beginPath();
         context.roundRect(panelX + panelWidth - 52, panelY + 14, 38, 38, 8);
         context.fill();
         context.stroke();
-        context.strokeStyle = '#374151';
+        context.strokeStyle = '#59616D';
         context.lineWidth = 2.5;
         context.beginPath();
         context.moveTo(panelX + panelWidth - 38, panelY + 25);
@@ -932,7 +999,7 @@ export function Whiteboard(): React.JSX.Element {
         context.moveTo(panelX + panelWidth - 24, panelY + 25);
         context.lineTo(panelX + panelWidth - 38, panelY + 39);
         context.stroke();
-        context.font = '700 20px sans-serif';
+        context.font = '500 19px "IBM Plex Sans JP", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, sans-serif';
         context.fillText('使用したスタンプ', panelX + 26, panelY + 92);
         const total = percentages.reduce((sum, item) => sum + item.count, 0);
         const chartX = panelX + 120;
@@ -956,24 +1023,108 @@ export function Whiteboard(): React.JSX.Element {
             startAngle = endAngle;
           });
         }
-        context.font = '18px sans-serif';
+        context.font = '17px "IBM Plex Sans JP", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, sans-serif';
         percentages.slice(0, 8).forEach(({ definition, count, percentage }, index) => {
           const rowY = panelY + 129 + index * 30;
           context.fillStyle = definition.color;
           context.beginPath();
           context.arc(panelX + 235, rowY - 6, 8, 0, Math.PI * 2);
           context.fill();
-          context.fillStyle = '#111827';
+          context.fillStyle = '#202733';
           context.fillText(`${definition.name}  ${count}件（${percentage}%）`, panelX + 252, rowY);
         });
         const footerY = panelY + panelHeight - 48;
-        context.fillStyle = '#111827';
-        context.font = '18px sans-serif';
+        context.fillStyle = '#202733';
+        context.font = '17px "IBM Plex Sans JP", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, sans-serif';
         const largest = percentages[0];
         context.fillText(largest ? `最大割合：${largest.definition.name}（${largest.percentage}%）` : '使用したスタンプはありません', panelX + 20, footerY - 24);
-        context.font = '700 28px sans-serif';
-        context.fillStyle = '#9a3412';
-        context.fillText(`道草値 ${michikusa.available ? michikusa.value : '計算不可'}`, panelX + 20, footerY + 8);
+        context.font = '500 28px "IBM Plex Sans JP", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, sans-serif';
+        context.fillStyle = '#5D4633';
+        context.fillText(`道草値 ${michikusaScore}`, panelX + 20, footerY + 8);
+        context.restore();
+      };
+
+      const drawWrapSummaryOverlay = (): void => {
+        if (!showWrapSummaryRef.current) return;
+        const michikusa = calculateMichikusa(current.stampDefinitions, current.placedStamps);
+        const farthest = michikusa.available ? current.stampDefinitions.find((definition) => definition.id === michikusa.farthestDefinitionId) : undefined;
+        const panelWidth = Math.min(560, canvas.clientWidth - 32);
+        const panelHeight = Math.min(560, canvas.clientHeight - 32);
+        const position = reviewSummaryPositionRef.current;
+        const panelX = canvas.clientWidth / 2 - panelWidth / 2 + position.x;
+        const panelY = canvas.clientHeight / 2 - panelHeight / 2 + position.y;
+        context.save();
+        context.shadowColor = 'rgba(47,43,37,.16)';
+        context.shadowBlur = 24;
+        context.shadowOffsetY = 7;
+        context.fillStyle = '#F7F3EB';
+        context.beginPath();
+        context.rect(panelX, panelY, panelWidth, panelHeight);
+        context.fill();
+        context.shadowBlur = 0;
+        context.shadowOffsetY = 0;
+        context.fillStyle = '#242321';
+        context.textAlign = 'left';
+        context.textBaseline = 'alphabetic';
+        context.font = '500 28px "Yu Gothic UI", "Noto Sans JP", sans-serif';
+        context.fillText('今回のまとめ', panelX + 44, panelY + 58);
+        context.strokeStyle = '#5e5a54';
+        context.lineWidth = 1.5;
+        context.beginPath();
+        context.moveTo(panelX + panelWidth - 43, panelY + 29);
+        context.lineTo(panelX + panelWidth - 29, panelY + 43);
+        context.moveTo(panelX + panelWidth - 29, panelY + 29);
+        context.lineTo(panelX + panelWidth - 43, panelY + 43);
+        context.stroke();
+        context.strokeStyle = '#D8D2C8';
+        context.lineWidth = 1;
+        for (const lineY of [214, 342]) {
+          context.beginPath();
+          context.moveTo(panelX + 44, panelY + lineY);
+          context.lineTo(panelX + panelWidth - 44, panelY + lineY);
+          context.stroke();
+        }
+        const drawNodeLabel = (label: string, y: number): void => {
+          context.strokeStyle = '#57534e';
+          context.lineWidth = 1.5;
+          context.beginPath();
+          context.arc(panelX + 51, panelY + y - 6, 6, 0, Math.PI * 2);
+          context.stroke();
+          context.fillStyle = '#5f5b55';
+          context.font = '400 16px "Yu Gothic UI", "Noto Sans JP", sans-serif';
+          context.fillText(label, panelX + 70, panelY + y);
+        };
+        drawNodeLabel('今日の道草値', 112);
+        context.fillStyle = '#9A5F3A';
+        context.font = '500 42px "Yu Gothic UI", "Noto Sans JP", sans-serif';
+        context.fillText(`${michikusaScore}`, panelX + 44, panelY + 174);
+        drawNodeLabel('今日の頭の中', 256);
+        context.fillStyle = '#292826';
+        context.font = '400 27px "Yu Gothic UI", "Noto Sans JP", sans-serif';
+        context.fillText(farthest?.name ?? '記録なし', panelX + 44, panelY + 306);
+        drawNodeLabel('今日のひとこと', 384);
+        const noteX = panelX + WRAP_NOTE_INSET;
+        const noteY = panelY + WRAP_NOTE_TOP;
+        const noteWidth = panelWidth - WRAP_NOTE_INSET * 2;
+        const noteHeight = panelHeight - WRAP_NOTE_TOP - WRAP_NOTE_BOTTOM;
+        context.fillStyle = '#ffffff';
+        context.fillRect(noteX, noteY, noteWidth, noteHeight);
+        context.save();
+        context.beginPath();
+        context.rect(noteX, noteY, noteWidth, noteHeight);
+        context.clip();
+        context.lineCap = 'round';
+        context.lineJoin = 'round';
+        [...wrapNoteStrokesRef.current, ...(activeWrapNoteStrokeRef.current ? [activeWrapNoteStrokeRef.current] : [])].forEach((stroke) => {
+          if (stroke.points.length < 2) return;
+          context.strokeStyle = stroke.color;
+          context.lineWidth = stroke.width;
+          context.beginPath();
+          context.moveTo(noteX + stroke.points[0].x, noteY + stroke.points[0].y);
+          stroke.points.slice(1).forEach((point) => context.lineTo(noteX + point.x, noteY + point.y));
+          context.stroke();
+        });
+        context.restore();
         context.restore();
       };
 
@@ -983,12 +1134,17 @@ export function Whiteboard(): React.JSX.Element {
         const x = camera.x + stamp.x * camera.zoom;
         const y = camera.y + stamp.y * camera.zoom;
         // Stamp dimensions are screen pixels, intentionally independent of camera zoom.
-        const stampSize = definition.size ?? 20;
-        const radius = stampSize / 2;
+        const stampSize = definition.size ?? DEFAULT_STAMP_SIZE;
+        const visualSize = stampSize * (definition.kind === 'theme' ? 0.94 : 0.86);
+        const radius = visualSize / 2;
         context.save();
-        context.fillStyle = `${definition.color}cc`;
-        context.strokeStyle = selectedStampRef.current === stamp.id ? '#111827' : definition.color;
-        context.lineWidth = selectedStampRef.current === stamp.id ? 3 : 1.5;
+        context.fillStyle = backgroundColorRef.current === 'black' ? '#202733' : '#F7F3EB';
+        context.strokeStyle = definition.color;
+        context.lineWidth = 2;
+        if (selectedStampRef.current === stamp.id) {
+          context.shadowColor = 'rgba(47, 79, 62, .28)';
+          context.shadowBlur = 9;
+        }
         if (definition.kind === 'theme') {
           context.beginPath();
           context.moveTo(x, y - radius);
@@ -1004,14 +1160,17 @@ export function Whiteboard(): React.JSX.Element {
           context.fill();
           context.stroke();
         }
-        context.fillStyle = '#111827';
-        const stampFontSize = Math.max(14, Math.round(stampSize * 0.8));
-        context.font = `600 ${stampFontSize}px sans-serif`;
-        context.fillText(definition.name, x + radius + 5, y + stampFontSize * 0.35);
+        context.shadowBlur = 0;
+        context.fillStyle = backgroundColorRef.current === 'black' ? '#F7F3EB' : '#202733';
+        const stampFontSize = Math.max(14, Math.round(stampSize * 0.72));
+        const stampFontWeight = definition.kind === 'theme' ? 600 : 500;
+        context.font = `${stampFontWeight} ${stampFontSize}px "BIZ UDPGothic", "Yu Gothic", Meiryo, sans-serif`;
+        context.fillText(definition.name, x + radius + 9, y + stampFontSize * 0.35);
         context.restore();
       });
       drawFarthestPath();
       drawSummaryOverlay();
+      drawWrapSummaryOverlay();
     };
 
     const redraw = (): void => {
@@ -1026,8 +1185,49 @@ export function Whiteboard(): React.JSX.Element {
 
       context.save();
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
-      context.fillStyle = '#ffffff';
+      const backgroundFill = backgroundColorRef.current === 'black'
+        ? '#111111'
+        : backgroundColorRef.current === 'paper'
+          ? '#fffefb'
+          : '#ffffff';
+      const patternColor = backgroundColorRef.current === 'black'
+        ? 'rgba(255,255,255,0.18)'
+        : 'rgba(70,90,110,0.18)';
+      context.fillStyle = backgroundFill;
       context.fillRect(0, 0, logicalWidth, logicalHeight);
+      context.fillStyle = patternColor;
+      context.strokeStyle = patternColor;
+      context.lineWidth = 1;
+      const camera = cameraRef.current;
+      const rawPatternStep = backgroundSpacingRef.current * camera.zoom;
+      const patternStep = rawPatternStep < 4
+        ? rawPatternStep * Math.ceil(4 / rawPatternStep)
+        : rawPatternStep;
+      const patternStartX = ((camera.x % patternStep) + patternStep) % patternStep;
+      const patternStartY = ((camera.y % patternStep) + patternStep) % patternStep;
+      if (backgroundPatternRef.current === 'dots') {
+        const dotRadius = clamp(1.4 * camera.zoom, 0.7, 2.5);
+        for (let y = patternStartY; y < logicalHeight; y += patternStep) {
+          for (let x = patternStartX; x < logicalWidth; x += patternStep) {
+            context.beginPath();
+            context.arc(x, y, dotRadius, 0, Math.PI * 2);
+            context.fill();
+          }
+        }
+      } else if (backgroundPatternRef.current === 'ruled' || backgroundPatternRef.current === 'grid') {
+        context.beginPath();
+        for (let y = patternStartY; y < logicalHeight; y += patternStep) {
+          context.moveTo(0, y);
+          context.lineTo(logicalWidth, y);
+        }
+        if (backgroundPatternRef.current === 'grid') {
+          for (let x = patternStartX; x < logicalWidth; x += patternStep) {
+            context.moveTo(x, 0);
+            context.lineTo(x, logicalHeight);
+          }
+        }
+        context.stroke();
+      }
       const visibleLayerIds = new Set(layersRef.current.filter((layer) => layer.visible !== false).map((layer) => layer.id));
       strokesRef.current.forEach((stroke) => {
         if (visibleLayerIds.has(stroke.layerId ?? DEFAULT_LAYER_ID)) drawStroke(stroke);
@@ -1164,6 +1364,22 @@ export function Whiteboard(): React.JSX.Element {
       const world = screenToWorld(screen.x, screen.y);
 
       if (workspaceModeRef.current === 'review') {
+        if (showWrapSummaryRef.current) {
+          const panelWidth = Math.min(560, canvas.clientWidth - 32);
+          const panelHeight = Math.min(560, canvas.clientHeight - 32);
+          const position = reviewSummaryPositionRef.current;
+          const panelX = canvas.clientWidth / 2 - panelWidth / 2 + position.x;
+          const panelY = canvas.clientHeight / 2 - panelHeight / 2 + position.y;
+          const noteX = panelX + WRAP_NOTE_INSET;
+          const noteY = panelY + WRAP_NOTE_TOP;
+          const noteWidth = panelWidth - WRAP_NOTE_INSET * 2;
+          const noteHeight = panelHeight - WRAP_NOTE_TOP - WRAP_NOTE_BOTTOM;
+          if (screen.x >= noteX && screen.x <= noteX + noteWidth && screen.y >= noteY && screen.y <= noteY + noteHeight) {
+            activeWrapNoteStrokeRef.current = { points: [{ x: screen.x - noteX, y: screen.y - noteY }], color: colorRef.current, width: widthRef.current };
+            redraw();
+          }
+          if (screen.x >= panelX && screen.x <= panelX + panelWidth && screen.y >= panelY && screen.y <= panelY + panelHeight) return;
+        }
         const definitionId = placementDefinitionRef.current;
         if (definitionId) {
           const definition = reviewRef.current.stampDefinitions.find((item) => item.id === definitionId);
@@ -1179,7 +1395,7 @@ export function Whiteboard(): React.JSX.Element {
         }
         const hit = [...reviewRef.current.placedStamps].reverse().find((stamp) => {
           const definition = reviewRef.current.stampDefinitions.find((item) => item.id === stamp.definitionId);
-          const hitRadius = (definition?.size ?? 20) / 2 + 4;
+          const hitRadius = (definition?.size ?? DEFAULT_STAMP_SIZE) / 2 + 4;
           return Math.hypot(stamp.x - world.x, stamp.y - world.y) * cameraRef.current.zoom <= hitRadius;
         });
         setSelectedStampId(hit?.id);
@@ -1227,6 +1443,17 @@ export function Whiteboard(): React.JSX.Element {
     const onPointerMove = (event: PointerEvent): void => {
       rememberPointerPosition(event);
       const screen = pointerPosition(event);
+
+      if (activeWrapNoteStrokeRef.current) {
+        const panelWidth = Math.min(560, canvas.clientWidth - 32);
+        const panelHeight = Math.min(560, canvas.clientHeight - 32);
+        const position = reviewSummaryPositionRef.current;
+        const noteX = canvas.clientWidth / 2 - panelWidth / 2 + position.x + WRAP_NOTE_INSET;
+        const noteY = canvas.clientHeight / 2 - panelHeight / 2 + position.y + WRAP_NOTE_TOP;
+        activeWrapNoteStrokeRef.current.points.push({ x: screen.x - noteX, y: screen.y - noteY });
+        redraw();
+        return;
+      }
 
       if (isPanningRef.current && lastScreenPointRef.current) {
         const previous = lastScreenPointRef.current;
@@ -1287,6 +1514,16 @@ export function Whiteboard(): React.JSX.Element {
 
       if (isErasingRef.current) {
         isErasingRef.current = false;
+        return;
+      }
+
+      if (activeWrapNoteStrokeRef.current) {
+        const noteStroke = activeWrapNoteStrokeRef.current;
+        if (noteStroke.points.length === 1) noteStroke.points.push({ ...noteStroke.points[0], x: noteStroke.points[0].x + 0.01 });
+        wrapNoteStrokesRef.current.push(noteStroke);
+        activeWrapNoteStrokeRef.current = undefined;
+        markDirty();
+        redraw();
         return;
       }
 
@@ -1447,6 +1684,8 @@ export function Whiteboard(): React.JSX.Element {
     if (nextMode.id !== 'review') {
       showReviewSummaryRef.current = false;
       setShowReviewSummary(false);
+      showWrapSummaryRef.current = false;
+      setShowWrapSummary(false);
     }
     window.dispatchEvent(new CustomEvent('michikusa-redraw'));
   };
@@ -1461,6 +1700,48 @@ export function Whiteboard(): React.JSX.Element {
   const setReviewSummaryVisible = (visible: boolean): void => {
     showReviewSummaryRef.current = visible;
     setShowReviewSummary(visible);
+    if (visible) {
+      showWrapSummaryRef.current = false;
+      setShowWrapSummary(false);
+    }
+    window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+  };
+  const setWrapSummaryVisible = (visible: boolean): void => {
+    showWrapSummaryRef.current = visible;
+    setShowWrapSummary(visible);
+    if (visible) {
+      showReviewSummaryRef.current = false;
+      setShowReviewSummary(false);
+    }
+    window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+  };
+  const exportWrapSummaryPng = async (): Promise<void> => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const previousPosition = reviewSummaryPositionRef.current;
+    const centeredPosition = { x: 0, y: 0 };
+    reviewSummaryPositionRef.current = centeredPosition;
+    setReviewSummaryPosition(centeredPosition);
+    setWrapSummaryVisible(true);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.min(560, canvas.clientWidth - 32);
+    const height = Math.min(560, canvas.clientHeight - 32);
+    const sourceX = (canvas.clientWidth / 2 - width / 2) * ratio;
+    const sourceY = (canvas.clientHeight / 2 - height / 2) * ratio;
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = Math.round(width * ratio);
+    exportCanvas.height = Math.round(height * ratio);
+    const exportContext = exportCanvas.getContext('2d');
+    if (!exportContext) return;
+    exportContext.drawImage(canvas, sourceX, sourceY, exportCanvas.width, exportCanvas.height, 0, 0, exportCanvas.width, exportCanvas.height);
+    const blob = await new Promise<Blob>((resolve, reject) => exportCanvas.toBlob((value) => value ? resolve(value) : reject(new Error('PNGを生成できませんでした。')), 'image/png'));
+    const projectFileName = currentPath?.split(/[\\/]/).pop() ?? '無題.m45';
+    const suggestedPngName = projectFileName.replace(/\.m45$/i, '') + '.png';
+    const result = await window.michikusa.savePng(new Uint8Array(await blob.arrayBuffer()), suggestedPngName);
+    if (!result.canceled) setStatusMessage(`PNGを保存しました: ${result.filePath}`);
+    reviewSummaryPositionRef.current = previousPosition;
+    setReviewSummaryPosition(previousPosition);
     window.dispatchEvent(new CustomEvent('michikusa-redraw'));
   };
   const updateLayers = (updater: (current: LayerDefinition[]) => LayerDefinition[]): void => {
@@ -1537,6 +1818,32 @@ export function Whiteboard(): React.JSX.Element {
           </div>}
         </div>
         <div className="app-menu">
+          <button onClick={() => setOpenMenu(openMenu === 'background' ? null : 'background')}>背景</button>
+          {openMenu === 'background' && <div className="app-menu-popup app-menu-popup-wide">
+            <div className="menu-section-title">背景色</div>
+            <button onClick={() => changeBackground('white')}>{backgroundColor === 'white' ? '✓ ' : ''}白</button>
+            <button onClick={() => changeBackground('black')}>{backgroundColor === 'black' ? '✓ ' : ''}黒</button>
+            <button onClick={() => changeBackground('paper')}>{backgroundColor === 'paper' ? '✓ ' : ''}紙色</button>
+            <div className="menu-section-title">模様</div>
+            <button onClick={() => changeBackground(undefined, 'plain')}>{backgroundPattern === 'plain' ? '✓ ' : ''}無地</button>
+            <button onClick={() => changeBackground(undefined, 'dots')}>{backgroundPattern === 'dots' ? '✓ ' : ''}ドット</button>
+            <button onClick={() => changeBackground(undefined, 'ruled')}>{backgroundPattern === 'ruled' ? '✓ ' : ''}罫線</button>
+            <button onClick={() => changeBackground(undefined, 'grid')}>{backgroundPattern === 'grid' ? '✓ ' : ''}方眼</button>
+            <div className="menu-section-title">模様の間隔</div>
+            <label className="background-spacing-control">
+              <input
+                type="range"
+                min={MIN_BACKGROUND_SPACING}
+                max={MAX_BACKGROUND_SPACING}
+                step={4}
+                value={backgroundSpacing}
+                onChange={(event) => changeBackgroundSpacing(Number(event.target.value))}
+              />
+              <span>{backgroundSpacing}</span>
+            </label>
+          </div>}
+        </div>
+        <div className="app-menu">
           <button onClick={() => setOpenMenu(openMenu === 'view' ? null : 'view')}>ビュー</button>
           {openMenu === 'view' && <div className="app-menu-popup">
             <button onClick={() => zoomFromMenu(cameraRef.current.zoom * 1.2)}>拡大</button>
@@ -1554,6 +1861,7 @@ export function Whiteboard(): React.JSX.Element {
       </nav>
       <header className="toolbar">
         <div className="brand">
+          <img className="brand-logo" src="/app-logo.png" alt="" />
           <strong>道草45 Studio</strong>
           <span className="version">v0.00.1</span>
           <button
@@ -1646,20 +1954,20 @@ export function Whiteboard(): React.JSX.Element {
           </label>
           <label className="width-control" title="スタンプのサイズ">
             <span>サイズ</span>
-            <input type="range" min="12" max="80" step="2" value={selectedStampDefinition?.size ?? 20} disabled={!selectedStampDefinition} onInput={(event) => {
+            <input type="range" min="12" max="80" step="2" value={selectedStampDefinition?.size ?? DEFAULT_STAMP_SIZE} disabled={!selectedStampDefinition} onInput={(event) => {
               if (selectedStampDefinition) updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, size: Number(event.currentTarget.value) } : definition) }));
             }} />
-            <output>{selectedStampDefinition?.size ?? 20}</output>
+            <output>{selectedStampDefinition?.size ?? DEFAULT_STAMP_SIZE}</output>
           </label>
         </div></>}
         </div>
 
         <div className="tool-group">
-          <button type="button" onClick={undo} disabled={!canUndo} title="Ctrl+Z">
-            Undo
+          <button type="button" className="history-icon-button" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
+            ↶
           </button>
-          <button type="button" onClick={redo} disabled={!canRedo} title="Ctrl+Y">
-            Redo
+          <button type="button" className="history-icon-button" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)" aria-label="Redo">
+            ↷
           </button>
         </div>
 
@@ -1755,7 +2063,7 @@ export function Whiteboard(): React.JSX.Element {
           onAdd={addLayer}
           onDelete={deleteLayer}
         />}
-        {workspaceMode === 'review' && showReviewSummary && <aside className="review-summary-panel" style={{ height: `min(${reviewSummaryHeight}px, calc(100% - 32px))`, transform: `translate(-50%, -50%) translate(${reviewSummaryPosition.x}px, ${reviewSummaryPosition.y}px)` }}>
+        {workspaceMode === 'review' && (showReviewSummary || showWrapSummary) && <aside className="review-summary-panel" style={{ height: `min(${showWrapSummary ? 560 : reviewSummaryHeight}px, calc(100% - 32px))`, transform: `translate(-50%, -50%) translate(${reviewSummaryPosition.x}px, ${reviewSummaryPosition.y}px)` }}>
           <div className="summary-header" onPointerDown={(event) => {
             event.currentTarget.setPointerCapture(event.pointerId);
             reviewSummaryDragRef.current = { pointerX: event.clientX, pointerY: event.clientY, originX: reviewSummaryPositionRef.current.x, originY: reviewSummaryPositionRef.current.y };
@@ -1767,7 +2075,7 @@ export function Whiteboard(): React.JSX.Element {
             setReviewSummaryPosition(next);
             window.dispatchEvent(new CustomEvent('michikusa-redraw'));
           }} onPointerUp={() => { reviewSummaryDragRef.current = undefined; }} onPointerCancel={() => { reviewSummaryDragRef.current = undefined; }}>
-            <button type="button" aria-label="今回のまとめを閉じる" onPointerDown={(event) => event.stopPropagation()} onClick={() => setReviewSummaryVisible(false)}>×</button>
+            <button type="button" aria-label="画面を閉じる" onPointerDown={(event) => event.stopPropagation()} onClick={() => { setReviewSummaryVisible(false); setWrapSummaryVisible(false); }}>×</button>
           </div>
         </aside>}
         {workspaceMode === 'review' && <ReviewPanel
@@ -1790,6 +2098,8 @@ export function Whiteboard(): React.JSX.Element {
           onReplaceDefinitions={replaceCustomDefinitions}
           onToggleFarthestPath={() => updateReview((current) => ({ ...current, displaySettings: { ...current.displaySettings, showFarthestPath: !current.displaySettings.showFarthestPath } }))}
           onShowSummary={() => setReviewSummaryVisible(!showReviewSummaryRef.current)}
+          onShowWrap={() => setWrapSummaryVisible(!showWrapSummaryRef.current)}
+          onExportWrap={() => void exportWrapSummaryPng()}
         />}
         <canvas
           ref={canvasRef}

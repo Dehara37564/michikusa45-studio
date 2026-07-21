@@ -27,6 +27,9 @@ export type Camera = {
 
 export type Tool = 'pen' | 'eraser';
 
+export type CanvasBackgroundColor = 'white' | 'black' | 'paper';
+export type CanvasBackgroundPattern = 'plain' | 'dots' | 'ruled' | 'grid';
+
 export type StampDefinition = {
   id: string;
   name: string;
@@ -58,7 +61,9 @@ export type ProjectFileV1 = {
   createdAt: string;
   updatedAt: string;
   canvas: {
-    background: 'plain';
+    background: CanvasBackgroundPattern;
+    backgroundColor?: CanvasBackgroundColor;
+    backgroundSpacing?: number;
     strokes: Stroke[];
     layers?: LayerDefinition[];
     activeLayerId?: string;

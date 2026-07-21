@@ -7,10 +7,17 @@ import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-nati
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
-    extraResource: ['node_modules/ffmpeg-static/ffmpeg.exe'],
+    icon: 'assets/app-icon',
+    extraResource: [
+      'assets/app-icon.png',
+      'LICENSE',
+      'THIRD_PARTY_NOTICES.md',
+      'PRIVACY.md',
+      'TERMS.md',
+    ],
   },
   makers: [
-    new MakerSquirrel({}),
+    new MakerSquirrel({ setupIcon: 'assets/app-icon.ico' }),
     new MakerZIP({}, ['win32']),
   ],
   plugins: [

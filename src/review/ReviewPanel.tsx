@@ -11,6 +11,8 @@ type Props = {
   onReplaceDefinitions: (definitions: StampDefinition[]) => void;
   onToggleFarthestPath: () => void;
   onShowSummary: () => void;
+  onShowWrap: () => void;
+  onExportWrap: () => void;
 };
 
 type StampTemplate = { id: string; name: string; definitions: Array<{ name: string; color: string; order: number; size?: number }> };
@@ -95,7 +97,7 @@ export function ReviewPanel(props: Props): React.JSX.Element {
       <div className="stamp-list">
         {[...props.review.stampDefinitions].sort((a, b) => a.order - b.order).map((definition) => <div className={`stamp-definition ${definition.kind === 'theme' ? 'theme-definition' : ''} ${props.selectedDefinitionId === definition.id ? 'selected' : ''}`} key={definition.id}>
           <button className="stamp-choice" onClick={() => props.onSelect(definition.id)}>
-            <span className="stamp-shape" style={{ backgroundColor: definition.color }} />
+            <span className="stamp-shape" style={{ borderColor: definition.color }} />
             {editingNameId === definition.id
               ? <input className="stamp-name-input" defaultValue={definition.name} autoFocus onClick={(event) => event.stopPropagation()} onBlur={(event) => finishNameEdit(definition, event.target.value)} onKeyDown={(event) => {
                 if (event.key === 'Enter') event.currentTarget.blur();
@@ -124,7 +126,7 @@ export function ReviewPanel(props: Props): React.JSX.Element {
         <div className="stamp-editor-actions"><button onClick={() => setCreatingDefinition(false)}>キャンセル</button><button className="primary" disabled={!draftName.trim() || !/^#[0-9a-f]{6}$/i.test(draftColor)} onClick={saveNewDefinition}>保存</button></div>
       </div>}
       <label className="review-value-toggle"><input type="checkbox" checked={props.review.displaySettings.showFarthestPath} onChange={props.onToggleFarthestPath} />道草値を表示</label>
-      <button className="show-summary-button" onClick={props.onShowSummary}>集計</button>
+      <div className="review-output-buttons"><button onClick={props.onShowSummary}>集計</button><button onClick={props.onShowWrap}>まとめ</button><button onClick={props.onExportWrap}>PNG出力</button></div>
     </>}
   </aside>;
 }
