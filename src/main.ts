@@ -1,4 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  session,
+  type MenuItemConstructorOptions,
+} from 'electron';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
@@ -9,6 +18,7 @@ import type {
   SaveProjectResult,
 } from './shared/project';
 import type { SaveRecordingResult } from './shared/recording';
+import type { MenuCommand, MenuPreset } from './shared/menu';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -17,6 +27,270 @@ const PROJECT_FILTER = {
   name: '道草45 Project',
   extensions: ['m45'],
 };
+
+type MenuPresets = {
+  colors: string[];
+  widths: number[];
+};
+
+const menuPresets: MenuPresets = { colors: [], widths: [] };
+
+const getMenuPresetsPath = (): string =>
+  path.join(app.getPath('userData'), 'menu-presets.json');
+
+const saveMenuPresets = async (): Promise<void> => {
+  await fs.writeFile(
+    getMenuPresetsPath(),
+    JSON.stringify(menuPresets, null, 2),
+    'utf8',
+  );
+};
+
+const loadMenuPresets = async (): Promise<void> => {
+  try {
+    const parsed: unknown = JSON.parse(
+      await fs.readFile(getMenuPresetsPath(), 'utf8'),
+    );
+    if (!parsed || typeof parsed !== 'object') return;
+
+    const candidate = parsed as Partial<MenuPresets>;
+    menuPresets.colors = Array.isArray(candidate.colors)
+      ? candidate.colors.filter(
+          (color): color is string =>
+            typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color),
+        )
+      : [];
+    menuPresets.widths = Array.isArray(candidate.widths)
+      ? candidate.widths.filter(
+          (width): width is number =>
+            typeof width === 'number' && width >= 1 && width <= 20,
+        )
+      : [];
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') console.error('Failed to load menu presets.', error);
+  }
+};
+
+const createColorSwatch = (color: string): Electron.NativeImage => {
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">',
+    '<rect x="0.5" y="0.5" width="15" height="15" rx="3"',
+    ` fill="${color}" stroke="#808080"/>`,
+    '</svg>',
+  ].join('');
+  return nativeImage.createFromDataURL(
+    `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
+  );
+};
+
+const removeMenuPreset = async (preset: MenuPreset): Promise<void> => {
+  if (preset.type === 'color') {
+    menuPresets.colors = menuPresets.colors.filter(
+      (color) => color !== preset.value,
+    );
+  } else {
+    menuPresets.widths = menuPresets.widths.filter(
+      (width) => width !== preset.value,
+    );
+  }
+  await saveMenuPresets();
+};
+
+const sendMenuCommand = (command: MenuCommand): void => {
+  BrowserWindow.getFocusedWindow()?.webContents.send('menu:command', command);
+};
+
+const installApplicationMenu = (): void => {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: 'ファイル',
+      submenu: [
+        {
+          label: '新規',
+          accelerator: 'CmdOrCtrl+N',
+          click: () => sendMenuCommand({ type: 'project:new' }),
+        },
+        {
+          label: '開く',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => sendMenuCommand({ type: 'project:open' }),
+        },
+        { type: 'separator' },
+        {
+          label: '保存',
+          accelerator: 'CmdOrCtrl+S',
+          click: () => sendMenuCommand({ type: 'project:save' }),
+        },
+        {
+          label: '名前を付けて保存',
+          accelerator: 'CmdOrCtrl+Shift+S',
+          click: () => sendMenuCommand({ type: 'project:save-as' }),
+        },
+        { type: 'separator' },
+        { label: '終了', role: 'quit' },
+      ],
+    },
+    {
+      label: '編集',
+      submenu: [
+        {
+          label: 'Undo',
+          accelerator: 'CmdOrCtrl+Z',
+          click: () => sendMenuCommand({ type: 'edit:undo' }),
+        },
+        {
+          label: 'Redo',
+          accelerator: 'CmdOrCtrl+Y',
+          click: () => sendMenuCommand({ type: 'edit:redo' }),
+        },
+      ],
+    },
+    {
+      label: 'ツール',
+      submenu: [
+        {
+          label: 'ペン',
+          accelerator: 'P',
+          click: () =>
+            sendMenuCommand({ type: 'tool:select', tool: 'pen' }),
+        },
+        {
+          label: '消しゴム',
+          accelerator: 'E',
+          click: () =>
+            sendMenuCommand({ type: 'tool:select', tool: 'eraser' }),
+        },
+        { type: 'separator' },
+        {
+          label: '色',
+          submenu: [
+            ...menuPresets.colors.map((color) => ({
+              label: color.toUpperCase(),
+              icon: createColorSwatch(color),
+              submenu: [
+                {
+                  label: '選択',
+                  click: () => sendMenuCommand({ type: 'tool:color', color }),
+                },
+                {
+                  label: '削除',
+                  click: () => {
+                    void removeMenuPreset({ type: 'color', value: color });
+                  },
+                },
+              ],
+            })),
+            ...(menuPresets.colors.length > 0
+              ? [{ type: 'separator' as const }]
+              : []),
+            {
+              label: '現在の色をプリセットに登録',
+              click: () => sendMenuCommand({ type: 'tool:register-color' }),
+            },
+          ],
+        },
+        {
+          label: '太さ',
+          submenu: [
+            ...menuPresets.widths.map((width) => ({
+              label: `${width}px`,
+              submenu: [
+                {
+                  label: '選択',
+                  click: () => sendMenuCommand({ type: 'tool:width', width }),
+                },
+                {
+                  label: '削除',
+                  click: () => {
+                    void removeMenuPreset({ type: 'width', value: width });
+                  },
+                },
+              ],
+            })),
+            ...(menuPresets.widths.length > 0
+              ? [{ type: 'separator' as const }]
+              : []),
+            {
+              label: '現在の太さをプリセットに登録',
+              click: () => sendMenuCommand({ type: 'tool:register-width' }),
+            },
+          ],
+        },
+      ],
+    },
+    {
+      label: 'ビュー',
+      submenu: [
+        {
+          label: '拡大',
+          accelerator: 'CmdOrCtrl+=',
+          click: () => sendMenuCommand({ type: 'view:zoom-in' }),
+        },
+        {
+          label: '縮小',
+          accelerator: 'CmdOrCtrl+-',
+          click: () => sendMenuCommand({ type: 'view:zoom-out' }),
+        },
+        {
+          label: 'リセット（100%）',
+          accelerator: 'CmdOrCtrl+0',
+          click: () => sendMenuCommand({ type: 'view:reset-zoom' }),
+        },
+      ],
+    },
+    {
+      label: 'ウィンドウ',
+      submenu: [
+        {
+          label: 'フルスクリーン',
+          accelerator: 'F11',
+          click: () => BrowserWindow.getFocusedWindow()?.setFullScreen(true),
+        },
+        {
+          label: 'ウィンドウ表示',
+          click: () => BrowserWindow.getFocusedWindow()?.setFullScreen(false),
+        },
+      ],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+};
+
+ipcMain.handle('menu:add-preset', async (_event, preset: MenuPreset) => {
+  if (preset.type === 'color') {
+    if (!/^#[0-9a-f]{6}$/i.test(preset.value)) return;
+    if (!menuPresets.colors.includes(preset.value)) {
+      menuPresets.colors.push(preset.value);
+    }
+  } else {
+    if (!Number.isFinite(preset.value) || preset.value < 1 || preset.value > 20) {
+      return;
+    }
+    if (!menuPresets.widths.includes(preset.value)) {
+      menuPresets.widths.push(preset.value);
+      menuPresets.widths.sort((first, second) => first - second);
+    }
+  }
+
+  await saveMenuPresets();
+});
+
+ipcMain.handle('menu:get-presets', () => ({
+  colors: [...menuPresets.colors],
+  widths: [...menuPresets.widths],
+}));
+
+ipcMain.handle('menu:remove-preset', async (_event, preset: MenuPreset) => {
+  await removeMenuPreset(preset);
+});
+
+ipcMain.handle('window:set-fullscreen', (_event, fullScreen: boolean) => {
+  BrowserWindow.getFocusedWindow()?.setFullScreen(fullScreen);
+});
+
+ipcMain.handle('app:quit', () => app.quit());
 
 const getFfmpegPath = (): string =>
   app.isPackaged
@@ -240,7 +514,9 @@ ipcMain.handle(
   },
 );
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await loadMenuPresets();
+  Menu.setApplicationMenu(null);
   session.defaultSession.setPermissionRequestHandler(
     (_webContents, permission, callback) => {
       callback(permission === 'media');

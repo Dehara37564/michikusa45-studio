@@ -1,7 +1,7 @@
 {
   "name": "michikusa45-studio",
   "productName": "道草45 Studio",
-  "version": "0.0.0-dev.0",
+  "version": "0.0.1",
   "description": "Development version of a personal infinite whiteboard and recording studio for Michikusa45",
   "main": ".vite/build/main.js",
   "scripts": {

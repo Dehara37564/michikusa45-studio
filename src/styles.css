@@ -50,8 +50,68 @@ button:disabled {
 
 .workspace {
   display: grid;
-  grid-template-rows: 56px 1fr;
+  grid-template-rows: 34px 56px 1fr;
   background: #eceff1;
+}
+
+.app-menu-bar {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  align-items: stretch;
+  padding: 2px 8px;
+  border-bottom: 1px solid #d8dde1;
+  background: #f7f8f9;
+  user-select: none;
+}
+
+.app-menu { position: relative; }
+.app-menu > button {
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+}
+.app-menu-popup {
+  position: absolute;
+  top: 30px;
+  left: 0;
+  z-index: 30;
+  display: flex;
+  min-width: 230px;
+  padding: 6px;
+  flex-direction: column;
+  border: 1px solid #cfd4d9;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.app-menu-popup-wide { min-width: 270px; }
+.app-menu-popup > button,
+.preset-row button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 5px;
+  text-align: left;
+}
+.app-menu-popup kbd { float: right; margin-left: 24px; opacity: .55; }
+.menu-section-title {
+  margin: 5px 6px 3px;
+  padding-top: 5px;
+  border-top: 1px solid #e3e6e8;
+  color: #667078;
+  font-size: 11px;
+}
+.preset-row { display: grid; grid-template-columns: 1fr 34px; gap: 4px; }
+.preset-select { display: flex; align-items: center; gap: 9px; }
+.preset-delete { padding: 2px; text-align: center !important; color: #b42318; }
+.color-swatch {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border: 1px solid #858b90;
+  border-radius: 4px;
 }
 
 .toolbar {
