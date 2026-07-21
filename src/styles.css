@@ -234,6 +234,59 @@ button:disabled {
   box-shadow: inset 0 0 0 1px #b42318;
 }
 
+.recording-controls { position: relative; }
+
+.audio-meter {
+  width: 58px;
+  height: 10px;
+  overflow: hidden;
+  border: 1px solid #c5cbd0;
+  border-radius: 999px;
+  background: #edf0f2;
+}
+
+.audio-meter span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #34a853 0 70%, #fbbc04 85%, #ea4335 100%);
+  transition: width 80ms linear;
+}
+
+.recording-settings-panel {
+  position: fixed;
+  z-index: 25;
+  top: 94px;
+  right: 14px;
+  display: grid;
+  width: 310px;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #cfd4d9;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+}
+
+.recording-settings-panel label:not(.settings-check) {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.recording-settings-panel select {
+  min-width: 0;
+  height: 30px;
+}
+
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+}
+
 .recording-time {
   min-width: 44px;
   font-size: 13px;
