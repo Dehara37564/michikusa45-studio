@@ -10,9 +10,25 @@ export type RecordingResult = {
   durationMilliseconds: number;
 };
 
+export type RecordingQuality = '720p' | '1080p' | '1440p';
+
+export type RecordingSettings = {
+  audioDeviceId: string;
+  quality: RecordingQuality;
+  videoBitsPerSecond: 4_000_000 | 8_000_000 | 12_000_000 | 20_000_000;
+  fps: 30 | 60;
+};
+
 type RecordingCallbacks = {
   onStateChange: (state: RecordingState) => void;
   onElapsedChange: (elapsedMilliseconds: number) => void;
+  onAudioLevelChange: (level: number) => void;
+};
+
+const QUALITY_DIMENSIONS: Record<RecordingQuality, [number, number]> = {
+  '720p': [1280, 720],
+  '1080p': [1920, 1080],
+  '1440p': [2560, 1440],
 };
 
 const chooseMimeType = (): string => {
@@ -29,6 +45,7 @@ export class RecordingManager {
   private readonly sourceCanvas: HTMLCanvasElement;
   private readonly outputCanvas: HTMLCanvasElement;
   private readonly callbacks: RecordingCallbacks;
+  private readonly settings: RecordingSettings;
   private readonly outputContext: CanvasRenderingContext2D;
 
   private mediaRecorder: MediaRecorder | null = null;
@@ -38,16 +55,22 @@ export class RecordingManager {
   private timerId: number | null = null;
   private startedAt = 0;
   private chunks: Blob[] = [];
+  private audioContext: AudioContext | null = null;
+  private audioAnalyser: AnalyserNode | null = null;
+  private audioSamples: Uint8Array<ArrayBuffer> | null = null;
 
   public constructor(
     sourceCanvas: HTMLCanvasElement,
     callbacks: RecordingCallbacks,
+    settings: RecordingSettings,
   ) {
     this.sourceCanvas = sourceCanvas;
     this.callbacks = callbacks;
+    this.settings = settings;
     this.outputCanvas = document.createElement('canvas');
-    this.outputCanvas.width = 1920;
-    this.outputCanvas.height = 1080;
+    const [width, height] = QUALITY_DIMENSIONS[settings.quality];
+    this.outputCanvas.width = width;
+    this.outputCanvas.height = height;
 
     const context = this.outputCanvas.getContext('2d', {
       alpha: false,
@@ -69,6 +92,9 @@ export class RecordingManager {
     try {
       this.microphoneStream = await navigator.mediaDevices.getUserMedia({
         audio: {
+          deviceId: this.settings.audioDeviceId
+            ? { exact: this.settings.audioDeviceId }
+            : undefined,
           channelCount: 1,
           echoCancellation: false,
           noiseSuppression: false,
@@ -78,9 +104,11 @@ export class RecordingManager {
         video: false,
       });
 
+      this.startAudioMeter(this.microphoneStream);
+
       this.startFramePump();
 
-      const videoStream = this.outputCanvas.captureStream(30);
+      const videoStream = this.outputCanvas.captureStream(this.settings.fps);
       const combined = new MediaStream([
         ...videoStream.getVideoTracks(),
         ...this.microphoneStream.getAudioTracks(),
@@ -91,7 +119,7 @@ export class RecordingManager {
       this.chunks = [];
       this.mediaRecorder = new MediaRecorder(combined, {
         mimeType: mimeType || undefined,
-        videoBitsPerSecond: 8_000_000,
+        videoBitsPerSecond: this.settings.videoBitsPerSecond,
         audioBitsPerSecond: 192_000,
       });
 
@@ -188,10 +216,34 @@ export class RecordingManager {
         );
       }
 
+      this.updateAudioLevel();
+
       this.animationFrameId = requestAnimationFrame(draw);
     };
 
     draw();
+  }
+
+  private startAudioMeter(stream: MediaStream): void {
+    this.audioContext = new AudioContext();
+    const source = this.audioContext.createMediaStreamSource(stream);
+    this.audioAnalyser = this.audioContext.createAnalyser();
+    this.audioAnalyser.fftSize = 256;
+    this.audioAnalyser.smoothingTimeConstant = 0.72;
+    source.connect(this.audioAnalyser);
+    this.audioSamples = new Uint8Array(this.audioAnalyser.fftSize);
+  }
+
+  private updateAudioLevel(): void {
+    if (!this.audioAnalyser || !this.audioSamples) return;
+    this.audioAnalyser.getByteTimeDomainData(this.audioSamples);
+    let sumSquares = 0;
+    for (const sample of this.audioSamples) {
+      const normalized = (sample - 128) / 128;
+      sumSquares += normalized * normalized;
+    }
+    const rms = Math.sqrt(sumSquares / this.audioSamples.length);
+    this.callbacks.onAudioLevelChange(Math.min(1, rms * 4));
   }
 
   private cleanup(): void {
@@ -212,6 +264,11 @@ export class RecordingManager {
     this.outputStream = null;
     this.mediaRecorder = null;
     this.chunks = [];
+    this.audioAnalyser = null;
+    this.audioSamples = null;
+    void this.audioContext?.close();
+    this.audioContext = null;
     this.callbacks.onElapsedChange(0);
+    this.callbacks.onAudioLevelChange(0);
   }
 }

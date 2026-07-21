@@ -8,6 +8,8 @@ import type {
 } from '../shared/project';
 import {
   RecordingManager,
+  type RecordingQuality,
+  type RecordingSettings,
   type RecordingState,
 } from '../recording/RecordingManager';
 
@@ -18,6 +20,20 @@ const DEFAULT_COLOR = '#202124';
 const ERASER_RADIUS_SCREEN = 18;
 const MIN_POINT_DISTANCE_SCREEN = 0.45;
 const SMOOTHING_DISTANCE_SCREEN = 18;
+
+type RecordingUiSettings = RecordingSettings & {
+  showDuration: boolean;
+  showAudioMeter: boolean;
+};
+
+const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
+  audioDeviceId: '',
+  quality: '1080p',
+  videoBitsPerSecond: 8_000_000,
+  fps: 30,
+  showDuration: true,
+  showAudioMeter: true,
+};
 
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(maximum, Math.max(minimum, value));
@@ -161,6 +177,20 @@ export function Whiteboard(): React.JSX.Element {
   const [recordingState, setRecordingState] =
     useState<RecordingState>('idle');
   const [recordingElapsed, setRecordingElapsed] = useState(0);
+  const [recordingSettings, setRecordingSettings] =
+    useState<RecordingUiSettings>(() => {
+      try {
+        const saved = localStorage.getItem('recording-settings');
+        return saved
+          ? { ...DEFAULT_RECORDING_SETTINGS, ...JSON.parse(saved) }
+          : DEFAULT_RECORDING_SETTINGS;
+      } catch {
+        return DEFAULT_RECORDING_SETTINGS;
+      }
+    });
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [colorPresets, setColorPresets] = useState<string[]>([]);
   const [widthPresets, setWidthPresets] = useState<number[]>([]);
@@ -173,6 +203,29 @@ export function Whiteboard(): React.JSX.Element {
 
   useEffect(() => {
     void refreshMenuPresets();
+  }, []);
+
+  const refreshAudioDevices = async (): Promise<void> => {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    setAudioDevices(devices.filter((device) => device.kind === 'audioinput'));
+  };
+
+  useEffect(() => {
+    localStorage.setItem(
+      'recording-settings',
+      JSON.stringify(recordingSettings),
+    );
+  }, [recordingSettings]);
+
+  useEffect(() => {
+    void refreshAudioDevices();
+    navigator.mediaDevices.addEventListener('devicechange', refreshAudioDevices);
+    return () => {
+      navigator.mediaDevices.removeEventListener(
+        'devicechange',
+        refreshAudioDevices,
+      );
+    };
   }, []);
 
   const requestHistoryRefresh = (): void => {
@@ -389,13 +442,16 @@ export function Whiteboard(): React.JSX.Element {
     if (!canvas || recordingState !== 'idle') return;
 
     try {
+      setShowRecordingSettings(false);
       const manager = new RecordingManager(canvas, {
         onStateChange: setRecordingState,
         onElapsedChange: setRecordingElapsed,
-      });
+        onAudioLevelChange: setAudioLevel,
+      }, recordingSettings);
 
       recordingManagerRef.current = manager;
       await manager.start();
+      await refreshAudioDevices();
       setStatusMessage('録画中です');
     } catch (error) {
       recordingManagerRef.current = null;
@@ -440,6 +496,10 @@ export function Whiteboard(): React.JSX.Element {
       const saveResult = await window.michikusa.saveRecording(
         bytes,
         `道草45-${stamp}.mp4`,
+        {
+          videoBitsPerSecond: recordingSettings.videoBitsPerSecond,
+          fps: recordingSettings.fps,
+        },
       );
 
       if (saveResult.canceled) {
@@ -1108,7 +1168,7 @@ export function Whiteboard(): React.JSX.Element {
           >
             ■ STOP
           </button>
-          <span className="recording-time">
+          {recordingSettings.showDuration && <span className="recording-time">
             {Math.floor(recordingElapsed / 60000)
               .toString()
               .padStart(2, '0')}
@@ -1116,7 +1176,54 @@ export function Whiteboard(): React.JSX.Element {
             {Math.floor((recordingElapsed % 60000) / 1000)
               .toString()
               .padStart(2, '0')}
-          </span>
+          </span>}
+          {recordingSettings.showAudioMeter && <div className="audio-meter" title="入力音量">
+            <span style={{ width: `${Math.round(audioLevel * 100)}%` }} />
+          </div>}
+          <button
+            type="button"
+            className={showRecordingSettings ? 'active' : ''}
+            onClick={() => setShowRecordingSettings((visible) => !visible)}
+            disabled={recordingState !== 'idle'}
+            title="録画設定"
+          >
+            ⚙
+          </button>
+          {showRecordingSettings && <div className="recording-settings-panel">
+            <label>
+              <span>入力音声</span>
+              <select value={recordingSettings.audioDeviceId} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, audioDeviceId: event.target.value }))}>
+                <option value="">既定のマイク</option>
+                {audioDevices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `マイク ${index + 1}`}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>画質</span>
+              <select value={recordingSettings.quality} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, quality: event.target.value as RecordingQuality }))}>
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+                <option value="1440p">1440p</option>
+              </select>
+            </label>
+            <label>
+              <span>ビットレート</span>
+              <select value={recordingSettings.videoBitsPerSecond} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, videoBitsPerSecond: Number(event.target.value) as RecordingSettings['videoBitsPerSecond'] }))}>
+                <option value={4_000_000}>4 Mbps</option>
+                <option value={8_000_000}>8 Mbps</option>
+                <option value={12_000_000}>12 Mbps</option>
+                <option value={20_000_000}>20 Mbps</option>
+              </select>
+            </label>
+            <label>
+              <span>fps</span>
+              <select value={recordingSettings.fps} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, fps: Number(event.target.value) as 30 | 60 }))}>
+                <option value={30}>30 fps</option>
+                <option value={60}>60 fps</option>
+              </select>
+            </label>
+            <label className="settings-check"><input type="checkbox" checked={recordingSettings.showDuration} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, showDuration: event.target.checked }))} />録画時間を表示</label>
+            <label className="settings-check"><input type="checkbox" checked={recordingSettings.showAudioMeter} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, showAudioMeter: event.target.checked }))} />音量メーターを表示</label>
+          </div>}
         </div>
 
         <span className="document-name" title={currentPath}>

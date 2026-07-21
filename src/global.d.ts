@@ -3,7 +3,10 @@ import type {
   ProjectFile,
   SaveProjectResult,
 } from './shared/project';
-import type { SaveRecordingResult } from './shared/recording';
+import type {
+  RecordingExportSettings,
+  SaveRecordingResult,
+} from './shared/recording';
 import type { MenuCommand, MenuPreset } from './shared/menu';
 
 declare global {
@@ -26,6 +29,7 @@ declare global {
       saveRecording: (
         bytes: Uint8Array,
         suggestedName: string,
+        settings: RecordingExportSettings,
       ) => Promise<SaveRecordingResult>;
     };
   }
