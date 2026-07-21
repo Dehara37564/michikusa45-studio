@@ -17,7 +17,10 @@ import type {
   ProjectFile,
   SaveProjectResult,
 } from './shared/project';
-import type { SaveRecordingResult } from './shared/recording';
+import type {
+  RecordingExportSettings,
+  SaveRecordingResult,
+} from './shared/recording';
 import type { MenuCommand, MenuPreset } from './shared/menu';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
@@ -300,6 +303,7 @@ const getFfmpegPath = (): string =>
 const convertWebmToMp4 = async (
   inputPath: string,
   outputPath: string,
+  settings: RecordingExportSettings,
 ): Promise<void> => {
   const ffmpegPath = getFfmpegPath();
   await fs.access(ffmpegPath);
@@ -318,8 +322,14 @@ const convertWebmToMp4 = async (
         'libx264',
         '-preset',
         'medium',
-        '-crf',
-        '18',
+        '-b:v',
+        String(settings.videoBitsPerSecond),
+        '-maxrate',
+        String(settings.videoBitsPerSecond),
+        '-bufsize',
+        String(settings.videoBitsPerSecond * 2),
+        '-r',
+        String(settings.fps),
         '-pix_fmt',
         'yuv420p',
         '-c:a',
@@ -474,7 +484,16 @@ ipcMain.handle(
     _event,
     bytes: Uint8Array,
     suggestedName: string,
+    settings: RecordingExportSettings,
   ): Promise<SaveRecordingResult> => {
+    const allowedBitrates = [4_000_000, 8_000_000, 12_000_000, 20_000_000];
+    if (
+      !allowedBitrates.includes(settings.videoBitsPerSecond) ||
+      (settings.fps !== 30 && settings.fps !== 60)
+    ) {
+      throw new Error('録画の出力設定が正しくありません。');
+    }
+
     const result = await dialog.showSaveDialog({
       title: '録画を保存',
       defaultPath: suggestedName,
@@ -502,7 +521,7 @@ ipcMain.handle(
 
     try {
       await fs.writeFile(inputPath, Buffer.from(bytes));
-      await convertWebmToMp4(inputPath, convertedPath);
+      await convertWebmToMp4(inputPath, convertedPath, settings);
       await fs.copyFile(convertedPath, filePath);
       return { canceled: false, filePath };
     } finally {
