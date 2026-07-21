@@ -5,6 +5,7 @@ import type {
   SaveProjectResult,
 } from './shared/project';
 import type { SaveRecordingResult } from './shared/recording';
+import type { MenuCommand, MenuPreset } from './shared/menu';
 
 contextBridge.exposeInMainWorld('michikusa', {
   saveProject: (
@@ -15,6 +16,22 @@ contextBridge.exposeInMainWorld('michikusa', {
     ipcRenderer.invoke('project:save', project, currentPath, saveAs),
   openProject: (): Promise<OpenProjectResult> =>
     ipcRenderer.invoke('project:open'),
+  onMenuCommand: (callback: (command: MenuCommand) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, command: MenuCommand) => {
+      callback(command);
+    };
+    ipcRenderer.on('menu:command', listener);
+    return () => ipcRenderer.removeListener('menu:command', listener);
+  },
+  addMenuPreset: (preset: MenuPreset): Promise<void> =>
+    ipcRenderer.invoke('menu:add-preset', preset),
+  getMenuPresets: (): Promise<{ colors: string[]; widths: number[] }> =>
+    ipcRenderer.invoke('menu:get-presets'),
+  removeMenuPreset: (preset: MenuPreset): Promise<void> =>
+    ipcRenderer.invoke('menu:remove-preset', preset),
+  setFullScreen: (fullScreen: boolean): Promise<void> =>
+    ipcRenderer.invoke('window:set-fullscreen', fullScreen),
+  quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
   saveRecording: (
     bytes: Uint8Array,
     suggestedName: string,

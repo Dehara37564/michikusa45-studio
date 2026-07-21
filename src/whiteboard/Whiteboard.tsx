@@ -131,6 +131,7 @@ const distancePointToSegment = (
 
 export function Whiteboard(): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const colorInputRef = useRef<HTMLInputElement | null>(null);
   const strokesRef = useRef<Stroke[]>([]);
   const redoRef = useRef<Stroke[]>([]);
   const activeStrokeRef = useRef<Stroke | null>(null);
@@ -160,6 +161,19 @@ export function Whiteboard(): React.JSX.Element {
   const [recordingState, setRecordingState] =
     useState<RecordingState>('idle');
   const [recordingElapsed, setRecordingElapsed] = useState(0);
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [colorPresets, setColorPresets] = useState<string[]>([]);
+  const [widthPresets, setWidthPresets] = useState<number[]>([]);
+
+  const refreshMenuPresets = async (): Promise<void> => {
+    const presets = await window.michikusa.getMenuPresets();
+    setColorPresets(presets.colors);
+    setWidthPresets(presets.widths);
+  };
+
+  useEffect(() => {
+    void refreshMenuPresets();
+  }, []);
 
   const requestHistoryRefresh = (): void => {
     setHistoryTick((value) => value + 1);
@@ -290,6 +304,85 @@ export function Whiteboard(): React.JSX.Element {
     requestHistoryRefresh();
     window.dispatchEvent(new CustomEvent('michikusa-redraw'));
   };
+
+  const zoomFromMenu = (nextZoom: number): void => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const camera = cameraRef.current;
+    const clampedZoom = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
+    const anchorX = canvas.clientWidth / 2;
+    const anchorY = canvas.clientHeight / 2;
+    const worldX = (anchorX - camera.x) / camera.zoom;
+    const worldY = (anchorY - camera.y) / camera.zoom;
+
+    camera.zoom = clampedZoom;
+    camera.x = anchorX - worldX * clampedZoom;
+    camera.y = anchorY - worldY * clampedZoom;
+    setZoomLabel(`${Math.round(clampedZoom * 100)}%`);
+    markDirty();
+    window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+  };
+
+  useEffect(() => {
+    return window.michikusa.onMenuCommand((command) => {
+      switch (command.type) {
+        case 'project:new':
+          newProject();
+          break;
+        case 'project:open':
+          void openProject();
+          break;
+        case 'project:save':
+          void save(false);
+          break;
+        case 'project:save-as':
+          void save(true);
+          break;
+        case 'edit:undo':
+          undo();
+          break;
+        case 'edit:redo':
+          redo();
+          break;
+        case 'tool:select':
+          setTool(command.tool);
+          break;
+        case 'tool:color':
+          setColor(command.color);
+          markDirty();
+          break;
+        case 'tool:color-picker':
+          colorInputRef.current?.click();
+          break;
+        case 'tool:register-color':
+          void window.michikusa.addMenuPreset({
+            type: 'color',
+            value: colorRef.current,
+          });
+          break;
+        case 'tool:width':
+          setLineWidth(command.width);
+          markDirty();
+          break;
+        case 'tool:register-width':
+          void window.michikusa.addMenuPreset({
+            type: 'width',
+            value: widthRef.current,
+          });
+          break;
+        case 'view:zoom-in':
+          zoomFromMenu(cameraRef.current.zoom * 1.2);
+          break;
+        case 'view:zoom-out':
+          zoomFromMenu(cameraRef.current.zoom / 1.2);
+          break;
+        case 'view:reset-zoom':
+          zoomFromMenu(1);
+          break;
+      }
+    });
+  });
 
   const startRecording = async (): Promise<void> => {
     const canvas = canvasRef.current;
@@ -857,10 +950,66 @@ export function Whiteboard(): React.JSX.Element {
 
   return (
     <section className="workspace">
+      <nav className="app-menu-bar" onMouseLeave={() => setOpenMenu(null)}>
+        <div className="app-menu">
+          <button onClick={() => setOpenMenu(openMenu === 'file' ? null : 'file')}>ファイル</button>
+          {openMenu === 'file' && <div className="app-menu-popup">
+            <button onClick={() => { newProject(); setOpenMenu(null); }}>新規 <kbd>Ctrl+N</kbd></button>
+            <button onClick={() => { void openProject(); setOpenMenu(null); }}>開く <kbd>Ctrl+O</kbd></button>
+            <button onClick={() => { void save(false); setOpenMenu(null); }}>保存 <kbd>Ctrl+S</kbd></button>
+            <button onClick={() => { void save(true); setOpenMenu(null); }}>名前を付けて保存</button>
+            <button onClick={() => void window.michikusa.quit()}>終了</button>
+          </div>}
+        </div>
+        <div className="app-menu">
+          <button onClick={() => setOpenMenu(openMenu === 'edit' ? null : 'edit')}>編集</button>
+          {openMenu === 'edit' && <div className="app-menu-popup">
+            <button onClick={() => { undo(); setOpenMenu(null); }} disabled={!canUndo}>Undo</button>
+            <button onClick={() => { redo(); setOpenMenu(null); }} disabled={!canRedo}>Redo</button>
+          </div>}
+        </div>
+        <div className="app-menu">
+          <button onClick={() => setOpenMenu(openMenu === 'tools' ? null : 'tools')}>ツール</button>
+          {openMenu === 'tools' && <div className="app-menu-popup app-menu-popup-wide">
+            <button onClick={() => { setTool('pen'); setOpenMenu(null); }}>ペン</button>
+            <button onClick={() => { setTool('eraser'); setOpenMenu(null); }}>消しゴム</button>
+            <div className="menu-section-title">色プリセット</div>
+            {colorPresets.map((preset) => <div className="preset-row" key={preset}>
+              <button className="preset-select" onClick={() => { setColor(preset); markDirty(); setOpenMenu(null); }}>
+                <span className="color-swatch" style={{ backgroundColor: preset }} />
+                <span>{preset.toUpperCase()}</span>
+              </button>
+              <button className="preset-delete" title={`${preset}を削除`} onClick={() => void window.michikusa.removeMenuPreset({ type: 'color', value: preset }).then(refreshMenuPresets)}>×</button>
+            </div>)}
+            <button onClick={() => void window.michikusa.addMenuPreset({ type: 'color', value: colorRef.current }).then(refreshMenuPresets)}>現在の色を登録</button>
+            <div className="menu-section-title">太さプリセット</div>
+            {widthPresets.map((preset) => <div className="preset-row" key={preset}>
+              <button className="preset-select" onClick={() => { setLineWidth(preset); markDirty(); setOpenMenu(null); }}>{preset}px</button>
+              <button className="preset-delete" title={`${preset}pxを削除`} onClick={() => void window.michikusa.removeMenuPreset({ type: 'width', value: preset }).then(refreshMenuPresets)}>×</button>
+            </div>)}
+            <button onClick={() => void window.michikusa.addMenuPreset({ type: 'width', value: widthRef.current }).then(refreshMenuPresets)}>現在の太さを登録</button>
+          </div>}
+        </div>
+        <div className="app-menu">
+          <button onClick={() => setOpenMenu(openMenu === 'view' ? null : 'view')}>ビュー</button>
+          {openMenu === 'view' && <div className="app-menu-popup">
+            <button onClick={() => zoomFromMenu(cameraRef.current.zoom * 1.2)}>拡大</button>
+            <button onClick={() => zoomFromMenu(cameraRef.current.zoom / 1.2)}>縮小</button>
+            <button onClick={() => zoomFromMenu(1)}>リセット（100%）</button>
+          </div>}
+        </div>
+        <div className="app-menu">
+          <button onClick={() => setOpenMenu(openMenu === 'window' ? null : 'window')}>ウィンドウ</button>
+          {openMenu === 'window' && <div className="app-menu-popup">
+            <button onClick={() => void window.michikusa.setFullScreen(true)}>フルスクリーン</button>
+            <button onClick={() => void window.michikusa.setFullScreen(false)}>ウィンドウ表示</button>
+          </div>}
+        </div>
+      </nav>
       <header className="toolbar">
         <div className="brand">
           <strong>道草45 Studio</strong>
-          <span className="version">v0.04.4</span>
+          <span className="version">v0.00.1</span>
         </div>
 
         <div className="tool-group">
@@ -905,6 +1054,7 @@ export function Whiteboard(): React.JSX.Element {
           <label className="color-control" title="線の色">
             <span>色</span>
             <input
+              ref={colorInputRef}
               type="color"
               value={color}
               onChange={(event) => {
