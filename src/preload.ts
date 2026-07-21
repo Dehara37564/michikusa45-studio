@@ -4,10 +4,7 @@ import type {
   ProjectFile,
   SaveProjectResult,
 } from './shared/project';
-import type {
-  RecordingExportSettings,
-  SaveRecordingResult,
-} from './shared/recording';
+import type { SaveRecordingResult } from './shared/recording';
 import type { MenuCommand, MenuPreset } from './shared/menu';
 
 contextBridge.exposeInMainWorld('michikusa', {
@@ -38,7 +35,8 @@ contextBridge.exposeInMainWorld('michikusa', {
   saveRecording: (
     bytes: Uint8Array,
     suggestedName: string,
-    settings: RecordingExportSettings,
   ): Promise<SaveRecordingResult> =>
-    ipcRenderer.invoke('recording:save', bytes, suggestedName, settings),
+    ipcRenderer.invoke('recording:save', bytes, suggestedName),
+  savePng: (bytes: Uint8Array, suggestedName: string): Promise<{ canceled: boolean; filePath?: string }> =>
+    ipcRenderer.invoke('image:save-png', bytes, suggestedName),
 });

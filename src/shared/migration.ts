@@ -7,11 +7,11 @@ import type {
 
 export const createDefaultReviewData = (): ReviewData => ({
   stampDefinitions: [
-    { id: 'theme', name: 'テーマ', color: '#70c9f4', kind: 'theme', order: 0, size: 20 },
+    { id: 'theme', name: 'テーマ', color: '#70c9f4', kind: 'theme', order: 0, size: 50 },
   ],
   placedStamps: [],
   visibility: { theme: true },
-  displaySettings: { showFarthestPath: true },
+  displaySettings: { showFarthestPath: false },
 });
 
 export const migrateV1ToV2 = (project: ProjectFileV1): ProjectFileV2 => ({
