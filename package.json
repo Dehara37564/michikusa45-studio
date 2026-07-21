@@ -1,0 +1,29 @@
+{
+  "name": "michikusa45-studio",
+  "productName": "道草45 Studio",
+  "version": "0.0.0-dev.0",
+  "description": "Development version of a personal infinite whiteboard and recording studio for Michikusa45",
+  "main": ".vite/build/main.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.8.1",
+    "@electron-forge/maker-squirrel": "^7.8.1",
+    "@electron-forge/maker-zip": "^7.8.1",
+    "@electron-forge/plugin-auto-unpack-natives": "^7.8.1",
+    "@electron-forge/plugin-vite": "^7.8.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "electron": "^37.2.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "private": true
+}
