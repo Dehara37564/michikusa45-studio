@@ -346,7 +346,7 @@ export function Whiteboard(): React.JSX.Element {
 
       const saveResult = await window.michikusa.saveRecording(
         bytes,
-        `道草45-${stamp}.webm`,
+        `道草45-${stamp}.mp4`,
       );
 
       if (saveResult.canceled) {

@@ -1,5 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import path from 'node:path';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import type {
   OpenProjectResult,
@@ -14,6 +16,69 @@ declare const MAIN_WINDOW_VITE_NAME: string;
 const PROJECT_FILTER = {
   name: '道草45 Project',
   extensions: ['m45'],
+};
+
+const getFfmpegPath = (): string =>
+  app.isPackaged
+    ? path.join(process.resourcesPath, 'ffmpeg.exe')
+    : path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe');
+
+const convertWebmToMp4 = async (
+  inputPath: string,
+  outputPath: string,
+): Promise<void> => {
+  const ffmpegPath = getFfmpegPath();
+  await fs.access(ffmpegPath);
+
+  await new Promise<void>((resolve, reject) => {
+    const ffmpeg = spawn(
+      ffmpegPath,
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-i',
+        inputPath,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'medium',
+        '-crf',
+        '18',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '192k',
+        '-movflags',
+        '+faststart',
+        outputPath,
+      ],
+      { windowsHide: true },
+    );
+
+    let stderr = '';
+    ffmpeg.stderr.setEncoding('utf8');
+    ffmpeg.stderr.on('data', (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-16_384);
+    });
+    ffmpeg.once('error', reject);
+    ffmpeg.once('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `FFmpeg conversion failed (exit code ${code ?? 'unknown'}).${
+              stderr ? `\n${stderr.trim()}` : ''
+            }`,
+          ),
+        );
+      }
+    });
+  });
 };
 
 const isProjectFile = (value: unknown): value is ProjectFile => {
@@ -141,8 +206,8 @@ ipcMain.handle(
       defaultPath: suggestedName,
       filters: [
         {
-          name: 'WebM video',
-          extensions: ['webm'],
+          name: 'MP4 video',
+          extensions: ['mp4'],
         },
       ],
     });
@@ -151,12 +216,27 @@ ipcMain.handle(
       return { canceled: true };
     }
 
-    const filePath = result.filePath.endsWith('.webm')
+    const filePath = result.filePath.toLowerCase().endsWith('.mp4')
       ? result.filePath
-      : `${result.filePath}.webm`;
+      : `${result.filePath}.mp4`;
 
-    await fs.writeFile(filePath, Buffer.from(bytes));
-    return { canceled: false, filePath };
+    const temporaryDirectory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'michikusa45-'),
+    );
+    const inputPath = path.join(temporaryDirectory, 'recording.webm');
+    const convertedPath = path.join(temporaryDirectory, 'recording.mp4');
+
+    try {
+      await fs.writeFile(inputPath, Buffer.from(bytes));
+      await convertWebmToMp4(inputPath, convertedPath);
+      await fs.copyFile(convertedPath, filePath);
+      return { canceled: false, filePath };
+    } finally {
+      await fs.rm(temporaryDirectory, {
+        recursive: true,
+        force: true,
+      }).catch(() => undefined);
+    }
   },
 );
 

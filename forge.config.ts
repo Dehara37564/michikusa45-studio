@@ -5,7 +5,10 @@ import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 
 const config: ForgeConfig = {
-  packagerConfig: { asar: true },
+  packagerConfig: {
+    asar: true,
+    extraResource: ['node_modules/ffmpeg-static/ffmpeg.exe'],
+  },
   makers: [
     new MakerSquirrel({}),
     new MakerZIP({}, ['win32']),
