@@ -1,16 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type {
-  Camera,
-  CanvasBackgroundColor,
-  CanvasBackgroundPattern,
-  LayerDefinition,
-  PlacedStamp,
-  Point,
-  ProjectFile,
-  ReviewData,
-  StampDefinition,
-  Stroke,
-  Tool,
+import {
+  DEFAULT_CANVAS_BACKGROUND_COLOR,
+  DEFAULT_CANVAS_BACKGROUND_PATTERN,
+  DEFAULT_CANVAS_BACKGROUND_SPACING,
+  type Camera,
+  type CanvasBackgroundColor,
+  type CanvasBackgroundPattern,
+  type LayerDefinition,
+  type ImportedCanvasImage,
+  type PlacedStamp,
+  type Point,
+  type ProjectFile,
+  type ReviewData,
+  type StampDefinition,
+  type Stroke,
+  type Tool,
 } from '../shared/project';
 import {
   RecordingManager,
@@ -22,19 +26,36 @@ import { createDefaultReviewData } from '../shared/migration';
 import { ReviewPanel } from '../review/ReviewPanel';
 import { calculateMichikusa, calculateMichikusaScore, calculatePercentages } from '../review/analysis';
 import { LayerPanel } from '../layers/LayerPanel';
+import { IllustrationToolbox } from '../IllustrationToolbox';
+import { ExportCropOverlay, type ExportCropRequest } from '../ExportCropOverlay';
+import { BRUSH_DEFINITIONS, getBrushDefinition, type BrushKind } from '../shared/brushes';
 
 const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 8;
 const DEFAULT_WIDTH = 3;
 const DEFAULT_COLOR = '#202124';
-const ERASER_RADIUS_SCREEN = 18;
+const DEFAULT_BRUSH: BrushKind = 'pen';
+const DEFAULT_OPACITY = 1;
+type DrawingSettingKey = BrushKind | 'eraser';
+type DrawingSetting = { width: number; opacity: number; color: string };
+const createDefaultDrawingSettings = (): Record<DrawingSettingKey, DrawingSetting> => ({
+  pen: { width: DEFAULT_WIDTH, opacity: 1, color: DEFAULT_COLOR },
+  pencil: { width: 3, opacity: 0.8, color: DEFAULT_COLOR },
+  marker: { width: 12, opacity: 0.5, color: '#F4C542' },
+  brush: { width: 8, opacity: 1, color: DEFAULT_COLOR },
+  eraser: { width: 24, opacity: 1, color: DEFAULT_COLOR },
+});
 const MIN_POINT_DISTANCE_SCREEN = 0.45;
 const SMOOTHING_DISTANCE_SCREEN = 18;
 const DEFAULT_LAYER_ID = 'layer-1';
 const DEFAULT_STAMP_SIZE = 50;
-const DEFAULT_BACKGROUND_COLOR: CanvasBackgroundColor = 'white';
-const DEFAULT_BACKGROUND_PATTERN: CanvasBackgroundPattern = 'plain';
-const DEFAULT_BACKGROUND_SPACING = 32;
+const DEFAULT_BACKGROUND_COLOR = DEFAULT_CANVAS_BACKGROUND_COLOR;
+const DEFAULT_BACKGROUND_PATTERN = DEFAULT_CANVAS_BACKGROUND_PATTERN;
+const DEFAULT_BACKGROUND_SPACING = DEFAULT_CANVAS_BACKGROUND_SPACING;
+const ZOOM_COMPENSATED_WIDTH_STORAGE_KEY = 'zoom-compensated-input-width';
+const loadZoomCompensatedInputWidth = (): boolean => {
+  try { return localStorage.getItem(ZOOM_COMPENSATED_WIDTH_STORAGE_KEY) === 'true'; } catch { return false; }
+};
 const MIN_BACKGROUND_SPACING = 8;
 const MAX_BACKGROUND_SPACING = 96;
 const WRAP_NOTE_INSET = 44;
@@ -51,15 +72,19 @@ type RecordingUiSettings = RecordingSettings & {
 };
 
 type WrapNoteStroke = { points: Array<{ x: number; y: number }>; color: string; width: number };
+type EditableSelection = { kind: 'stroke' | 'image'; id: string };
+type EditableSnapshot = { strokes: Array<{ id: string; baseWidth: number; points: Point[] }>; images: Array<{ id: string; x: number; y: number; width: number; height: number }> };
 
 const WORKSPACE_MODES = [
   { id: 'create', label: '思考' },
   { id: 'review', label: '分析' },
+  { id: 'illustration', label: 'イラスト' },
 ] as const;
 
 type WorkspaceMode = (typeof WORKSPACE_MODES)[number]['id'];
 
 const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
+  microphoneEnabled: true,
   audioDeviceId: '',
   quality: '1080p',
   videoBitsPerSecond: 8_000_000,
@@ -70,6 +95,48 @@ const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
 
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(maximum, Math.max(minimum, value));
+
+const hexToRgb = (hex: string): { r: number; g: number; b: number } => {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return { r: (value >> 16) & 255, g: (value >> 8) & 255, b: value & 255 };
+};
+
+const rgbToHex = (r: number, g: number, b: number): string =>
+  `#${[r, g, b].map((value) => Math.round(value).toString(16).padStart(2, '0')).join('')}`;
+
+const rgbToHsv = (r: number, g: number, b: number): { h: number; s: number; v: number } => {
+  const red = r / 255;
+  const green = g / 255;
+  const blue = b / 255;
+  const maximum = Math.max(red, green, blue);
+  const minimum = Math.min(red, green, blue);
+  const delta = maximum - minimum;
+  let hue = 0;
+  if (delta > 0) {
+    if (maximum === red) hue = 60 * (((green - blue) / delta) % 6);
+    else if (maximum === green) hue = 60 * ((blue - red) / delta + 2);
+    else hue = 60 * ((red - green) / delta + 4);
+  }
+  return {
+    h: hue < 0 ? hue + 360 : hue,
+    s: maximum === 0 ? 0 : delta / maximum,
+    v: maximum,
+  };
+};
+
+const hsvToRgb = (h: number, s: number, v: number): { r: number; g: number; b: number } => {
+  const chroma = v * s;
+  const section = h / 60;
+  const secondary = chroma * (1 - Math.abs((section % 2) - 1));
+  const [red, green, blue] = section < 1 ? [chroma, secondary, 0]
+    : section < 2 ? [secondary, chroma, 0]
+      : section < 3 ? [0, chroma, secondary]
+        : section < 4 ? [0, secondary, chroma]
+          : section < 5 ? [secondary, 0, chroma]
+            : [chroma, 0, secondary];
+  const match = v - chroma;
+  return { r: (red + match) * 255, g: (green + match) * 255, b: (blue + match) * 255 };
+};
 
 const makeId = (): string =>
   `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -151,6 +218,69 @@ const midpoint = (first: Point, second: Point): Point => ({
   pressure: (first.pressure + second.pressure) / 2,
 });
 
+const drawStrokePath = (context: CanvasRenderingContext2D, stroke: Stroke, widthScale = 1): void => {
+  if (stroke.points.length < 2) return;
+  context.save();
+  context.strokeStyle = stroke.color;
+  const brushDefinition = getBrushDefinition(stroke.brush);
+  context.globalAlpha = clamp((stroke.opacity ?? 1) * brushDefinition.opacityMultiplier, 0.02, 1);
+  context.lineCap = stroke.brush === 'marker' ? 'butt' : 'round';
+  context.lineJoin = stroke.brush === 'marker' ? 'bevel' : 'round';
+  const points = stroke.points;
+  const widthAt = (pressure: number, progress: number, segmentIndex: number): number => {
+    const pressureFactor = stroke.brush === 'marker' ? 1 : Math.max(0.15, pressure);
+    const shapeFactor = stroke.brush === 'brush'
+      ? 0.18 + 0.82 * Math.pow(Math.sin(Math.PI * clamp(progress, 0.02, 0.98)), 0.35)
+      : stroke.brush === 'pencil' ? 0.82 + 0.18 * Math.sin(segmentIndex * 2.17) : 1;
+    return stroke.baseWidth * brushDefinition.widthMultiplier * widthScale * pressureFactor * shapeFactor;
+  };
+  if (points.length === 2) {
+    context.lineWidth = widthAt((points[0].pressure + points[1].pressure) / 2, .5, 0);
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    context.lineTo(points[1].x, points[1].y);
+    context.stroke();
+    context.restore();
+    return;
+  }
+  if (stroke.brush !== 'brush') {
+    const averagePressure = points.reduce((sum, point) => sum + point.pressure, 0) / points.length;
+    context.lineWidth = widthAt(averagePressure, .5, 0);
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (let index = 1; index < points.length - 1; index += 1) {
+      const control = points[index];
+      const end = midpoint(control, points[index + 1]);
+      context.quadraticCurveTo(control.x, control.y, end.x, end.y);
+    }
+    const beforeLast = points[points.length - 2];
+    const last = points[points.length - 1];
+    context.quadraticCurveTo(beforeLast.x, beforeLast.y, last.x, last.y);
+    context.stroke();
+    context.restore();
+    return;
+  }
+  let segmentStart = points[0];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const control = points[index];
+    const segmentEnd = midpoint(control, points[index + 1]);
+    context.lineWidth = widthAt((segmentStart.pressure + control.pressure + segmentEnd.pressure) / 3, index / (points.length - 1), index);
+    context.beginPath();
+    context.moveTo(segmentStart.x, segmentStart.y);
+    context.quadraticCurveTo(control.x, control.y, segmentEnd.x, segmentEnd.y);
+    context.stroke();
+    segmentStart = segmentEnd;
+  }
+  const last = points[points.length - 1];
+  const beforeLast = points[points.length - 2];
+  context.lineWidth = widthAt((beforeLast.pressure + last.pressure) / 2, 1, points.length - 1);
+  context.beginPath();
+  context.moveTo(segmentStart.x, segmentStart.y);
+  context.quadraticCurveTo(beforeLast.x, beforeLast.y, last.x, last.y);
+  context.stroke();
+  context.restore();
+};
+
 const distancePointToSegment = (
   point: Point,
   start: Point,
@@ -180,7 +310,6 @@ const distancePointToSegment = (
 
 export function Whiteboard(): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const colorInputRef = useRef<HTMLInputElement | null>(null);
   const strokesRef = useRef<Stroke[]>([]);
   const redoRef = useRef<Stroke[]>([]);
   const activeStrokeRef = useRef<Stroke | null>(null);
@@ -196,6 +325,8 @@ export function Whiteboard(): React.JSX.Element {
   const isPointerOverCanvasRef = useRef(false);
   const createdAtRef = useRef(new Date().toISOString());
   const recordingManagerRef = useRef<RecordingManager | null>(null);
+  const recordingSceneVersionRef = useRef(0);
+  const lastRenderedRecordingVersionRef = useRef(-1);
   const recordingStateRef = useRef<RecordingState>('idle');
   const recordingElapsedRef = useRef(0);
   const reviewRef = useRef<ReviewData>(createDefaultReviewData());
@@ -206,7 +337,13 @@ export function Whiteboard(): React.JSX.Element {
   const placementDefinitionRef = useRef<string | undefined>(undefined);
   const selectedStampRef = useRef<string | undefined>(undefined);
   const draggingStampRef = useRef<string | undefined>(undefined);
+  const selectedEditablesRef = useRef<EditableSelection[]>([]);
+  const editableGestureRef = useRef<{ mode: 'move' | 'scale' | 'marquee'; start: Point; snapshot?: EditableSnapshot; bounds?: { x: number; y: number; width: number; height: number } } | undefined>(undefined);
+  const marqueeRectRef = useRef<{ x: number; y: number; width: number; height: number } | undefined>(undefined);
+  const selectionModeRef = useRef<'transform' | 'marquee'>('transform');
   const layersRef = useRef<LayerDefinition[]>(createDefaultLayers());
+  const importedImagesRef = useRef<ImportedCanvasImage[]>([]);
+  const imageElementCacheRef = useRef(new Map<string, HTMLImageElement>());
   const activeLayerIdRef = useRef(DEFAULT_LAYER_ID);
   const showReviewSummaryRef = useRef(false);
   const showWrapSummaryRef = useRef(false);
@@ -218,13 +355,26 @@ export function Whiteboard(): React.JSX.Element {
   const toolRef = useRef<Tool>('pen');
   const colorRef = useRef(DEFAULT_COLOR);
   const widthRef = useRef(DEFAULT_WIDTH);
+  const brushRef = useRef<BrushKind>(DEFAULT_BRUSH);
+  const opacityRef = useRef(DEFAULT_OPACITY);
+  const zoomCompensatedInputWidthRef = useRef(loadZoomCompensatedInputWidth());
+  const drawingSettingsRef = useRef<Record<DrawingSettingKey, DrawingSetting>>(createDefaultDrawingSettings());
+  const activeDrawingSettingKeyRef = useRef<DrawingSettingKey>('pen');
+  const eyedropperTargetRef = useRef<{ kind: 'pen' } | { kind: 'stamp'; definitionId: string } | undefined>(undefined);
 
   const [tool, setTool] = useState<Tool>('pen');
+  const [selectionMode, setSelectionMode] = useState<'transform' | 'marquee'>('transform');
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [lineWidth, setLineWidth] = useState(DEFAULT_WIDTH);
+  const [brush, setBrush] = useState<BrushKind>(DEFAULT_BRUSH);
+  const [strokeOpacity, setStrokeOpacity] = useState(DEFAULT_OPACITY);
+  const [zoomCompensatedInputWidth, setZoomCompensatedInputWidth] = useState(() => zoomCompensatedInputWidthRef.current);
+  const [isEyedropping, setIsEyedropping] = useState(false);
+  const [showImageExport, setShowImageExport] = useState(false);
   const [backgroundColor, setBackgroundColor] = useState<CanvasBackgroundColor>(DEFAULT_BACKGROUND_COLOR);
   const [backgroundPattern, setBackgroundPattern] = useState<CanvasBackgroundPattern>(DEFAULT_BACKGROUND_PATTERN);
   const [backgroundSpacing, setBackgroundSpacing] = useState(DEFAULT_BACKGROUND_SPACING);
+  const [isSpaceDown, setIsSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [zoomLabel, setZoomLabel] = useState('100%');
   const [currentPath, setCurrentPath] = useState<string | undefined>();
@@ -259,6 +409,7 @@ export function Whiteboard(): React.JSX.Element {
   const [layers, setLayers] = useState<LayerDefinition[]>(createDefaultLayers);
   const [activeLayerId, setActiveLayerId] = useState(DEFAULT_LAYER_ID);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [fileMenuPage, setFileMenuPage] = useState<'root' | 'settings' | 'pen'>('root');
   const [colorPresets, setColorPresets] = useState<string[]>([]);
   const [widthPresets, setWidthPresets] = useState<number[]>([]);
 
@@ -280,6 +431,17 @@ export function Whiteboard(): React.JSX.Element {
   useEffect(() => { activeLayerIdRef.current = activeLayerId; }, [activeLayerId]);
   useEffect(() => { recordingStateRef.current = recordingState; }, [recordingState]);
   useEffect(() => { recordingElapsedRef.current = recordingElapsed; }, [recordingElapsed]);
+
+  useEffect(() => {
+    if (openMenu !== 'color-picker' && openMenu !== 'stamp-color-picker') return;
+    const closeColorPickerOutside = (event: PointerEvent): void => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.color-picker-control')) return;
+      setOpenMenu(null);
+    };
+    document.addEventListener('pointerdown', closeColorPickerOutside);
+    return () => document.removeEventListener('pointerdown', closeColorPickerOutside);
+  }, [openMenu]);
 
   const refreshAudioDevices = async (): Promise<void> => {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -312,17 +474,96 @@ export function Whiteboard(): React.JSX.Element {
     setIsDirty(true);
   };
 
+  const changeZoomCompensatedInputWidth = (enabled: boolean): void => {
+    zoomCompensatedInputWidthRef.current = enabled;
+    setZoomCompensatedInputWidth(enabled);
+    localStorage.setItem(ZOOM_COMPENSATED_WIDTH_STORAGE_KEY, String(enabled));
+    markDirty();
+  };
+
+  const loadCanvasImage = (item: ImportedCanvasImage): Promise<HTMLImageElement> => {
+    const cached = imageElementCacheRef.current.get(item.id);
+    if (cached?.complete) return Promise.resolve(cached);
+    return new Promise((resolve, reject) => {
+      const image = cached ?? new Image();
+      imageElementCacheRef.current.set(item.id, image);
+      image.onload = () => { window.dispatchEvent(new CustomEvent('michikusa-redraw')); resolve(image); };
+      image.onerror = () => reject(new Error(`画像を読み込めませんでした: ${item.name}`));
+      if (!cached) image.src = item.dataUrl;
+    });
+  };
+
+  const drawImportedImages = (context: CanvasRenderingContext2D): void => {
+    const visibleLayerIds = new Set(layersRef.current.filter((layer) => layer.visible !== false).map((layer) => layer.id));
+    importedImagesRef.current.forEach((item) => {
+      if (!visibleLayerIds.has(item.layerId ?? DEFAULT_LAYER_ID)) return;
+      const image = imageElementCacheRef.current.get(item.id);
+      if (image?.complete && image.naturalWidth > 0) context.drawImage(image, item.x, item.y, item.width, item.height);
+    });
+  };
+
+  const getEditableBounds = (selection = selectedEditablesRef.current): { x: number; y: number; width: number; height: number } | undefined => {
+    const rectangles: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+    selection.forEach((selected) => {
+      if (selected.kind === 'image') {
+        const image = importedImagesRef.current.find((item) => item.id === selected.id);
+        if (image) rectangles.push({ left: image.x, top: image.y, right: image.x + image.width, bottom: image.y + image.height });
+      } else {
+        const stroke = strokesRef.current.find((item) => item.id === selected.id);
+        if (stroke?.points.length) {
+          const xs = stroke.points.map((point) => point.x); const ys = stroke.points.map((point) => point.y); const inset = stroke.baseWidth / 2;
+          rectangles.push({ left: Math.min(...xs) - inset, top: Math.min(...ys) - inset, right: Math.max(...xs) + inset, bottom: Math.max(...ys) + inset });
+        }
+      }
+    });
+    if (!rectangles.length) return undefined;
+    const left = Math.min(...rectangles.map((item) => item.left)); const top = Math.min(...rectangles.map((item) => item.top));
+    const right = Math.max(...rectangles.map((item) => item.right)); const bottom = Math.max(...rectangles.map((item) => item.bottom));
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  };
+
+  const snapshotEditableSelection = (): EditableSnapshot => ({
+    strokes: selectedEditablesRef.current.flatMap((selected) => selected.kind === 'stroke' ? strokesRef.current.filter((stroke) => stroke.id === selected.id).map((stroke) => ({ id: stroke.id, baseWidth: stroke.baseWidth, points: stroke.points.map((point) => ({ ...point })) })) : []),
+    images: selectedEditablesRef.current.flatMap((selected) => selected.kind === 'image' ? importedImagesRef.current.filter((image) => image.id === selected.id).map((image) => ({ id: image.id, x: image.x, y: image.y, width: image.width, height: image.height })) : []),
+  });
+
   useEffect(() => {
     toolRef.current = tool;
   }, [tool]);
 
   useEffect(() => {
     colorRef.current = color;
+    const current = drawingSettingsRef.current[activeDrawingSettingKeyRef.current];
+    drawingSettingsRef.current[activeDrawingSettingKeyRef.current] = { ...current, color };
   }, [color]);
 
   useEffect(() => {
     widthRef.current = lineWidth;
   }, [lineWidth]);
+
+  useEffect(() => { brushRef.current = brush; }, [brush]);
+  useEffect(() => {
+    opacityRef.current = strokeOpacity;
+    drawingSettingsRef.current[activeDrawingSettingKeyRef.current] = { width: widthRef.current, opacity: strokeOpacity, color: colorRef.current };
+  }, [strokeOpacity]);
+  useEffect(() => {
+    drawingSettingsRef.current[activeDrawingSettingKeyRef.current] = { width: lineWidth, opacity: opacityRef.current, color: colorRef.current };
+  }, [lineWidth]);
+
+  useEffect(() => {
+    if (tool === 'select') return;
+    const previousKey = activeDrawingSettingKeyRef.current;
+    drawingSettingsRef.current[previousKey] = { width: widthRef.current, opacity: opacityRef.current, color: colorRef.current };
+    const nextKey: DrawingSettingKey = tool === 'eraser' ? 'eraser' : brush;
+    activeDrawingSettingKeyRef.current = nextKey;
+    const next = drawingSettingsRef.current[nextKey];
+    widthRef.current = next.width;
+    opacityRef.current = next.opacity;
+    colorRef.current = next.color;
+    setLineWidth(next.width);
+    setStrokeOpacity(next.opacity);
+    setColor(next.color);
+  }, [tool, brush]);
 
   const buildProject = (): ProjectFile => {
     const now = new Date().toISOString();
@@ -338,11 +579,16 @@ export function Whiteboard(): React.JSX.Element {
         strokes: cloneStrokes(strokesRef.current),
         layers,
         activeLayerId,
+        importedImages: structuredClone(importedImagesRef.current),
       },
       camera: { ...cameraRef.current },
       settings: {
         selectedColor: colorRef.current,
         selectedWidth: widthRef.current,
+        selectedBrush: brushRef.current,
+        selectedOpacity: opacityRef.current,
+        zoomCompensatedInputWidth: zoomCompensatedInputWidthRef.current,
+        drawingSettings: structuredClone(drawingSettingsRef.current),
       },
       review,
     };
@@ -386,8 +632,12 @@ export function Whiteboard(): React.JSX.Element {
       const openedLayerIds = new Set(openedLayers.map((layer) => layer.id));
       const openedActiveLayerId = project.canvas.activeLayerId && openedLayerIds.has(project.canvas.activeLayerId) ? project.canvas.activeLayerId : openedLayers[0].id;
       strokesRef.current = cloneStrokes(project.canvas.strokes).map((stroke) => ({ ...stroke, layerId: stroke.layerId && openedLayerIds.has(stroke.layerId) ? stroke.layerId : openedLayers[0].id }));
+      importedImagesRef.current = structuredClone(project.canvas.importedImages ?? []).map((item) => ({ ...item, layerId: item.layerId && openedLayerIds.has(item.layerId) ? item.layerId : openedLayers[0].id }));
+      imageElementCacheRef.current.clear();
+      importedImagesRef.current.forEach((item) => { void loadCanvasImage(item); });
       redoRef.current = [];
       activeStrokeRef.current = null;
+      selectedEditablesRef.current = [];
       cameraRef.current = { ...project.camera };
       const openedBackgroundColor = project.canvas.backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
       const openedBackgroundPattern = project.canvas.background ?? DEFAULT_BACKGROUND_PATTERN;
@@ -400,8 +650,26 @@ export function Whiteboard(): React.JSX.Element {
       setBackgroundSpacing(openedBackgroundSpacing);
       createdAtRef.current = project.createdAt;
 
-      setColor(project.settings.selectedColor);
-      setLineWidth(project.settings.selectedWidth);
+      const openedBrush = project.settings.selectedBrush ?? DEFAULT_BRUSH;
+      const openedOpacity = clamp(project.settings.selectedOpacity ?? DEFAULT_OPACITY, 0.05, 1);
+      const openedZoomCompensatedInputWidth = project.settings.zoomCompensatedInputWidth ?? loadZoomCompensatedInputWidth();
+      zoomCompensatedInputWidthRef.current = openedZoomCompensatedInputWidth;
+      setZoomCompensatedInputWidth(openedZoomCompensatedInputWidth);
+      localStorage.setItem(ZOOM_COMPENSATED_WIDTH_STORAGE_KEY, String(openedZoomCompensatedInputWidth));
+      const defaultDrawingSettings = createDefaultDrawingSettings();
+      const savedDrawingSettings = project.settings.drawingSettings;
+      drawingSettingsRef.current = Object.fromEntries(Object.entries(defaultDrawingSettings).map(([key, defaults]) => [key, { ...defaults, ...(savedDrawingSettings?.[key as DrawingSettingKey] ?? {}) }])) as Record<DrawingSettingKey, DrawingSetting>;
+      if (!savedDrawingSettings) drawingSettingsRef.current[openedBrush] = { width: project.settings.selectedWidth, opacity: openedOpacity, color: project.settings.selectedColor };
+      activeDrawingSettingKeyRef.current = openedBrush;
+      const openedDrawingSetting = drawingSettingsRef.current[openedBrush];
+      brushRef.current = openedBrush;
+      widthRef.current = openedDrawingSetting.width;
+      opacityRef.current = openedDrawingSetting.opacity;
+      colorRef.current = openedDrawingSetting.color;
+      setBrush(openedBrush);
+      setLineWidth(openedDrawingSetting.width);
+      setStrokeOpacity(openedDrawingSetting.opacity);
+      setColor(openedDrawingSetting.color);
       setZoomLabel(`${Math.round(project.camera.zoom * 100)}%`);
       setCurrentPath(result.filePath);
       setIsDirty(false);
@@ -429,8 +697,11 @@ export function Whiteboard(): React.JSX.Element {
     if (!confirmDiscard()) return;
 
     strokesRef.current = [];
+    importedImagesRef.current = [];
+    imageElementCacheRef.current.clear();
     redoRef.current = [];
     activeStrokeRef.current = null;
+    selectedEditablesRef.current = [];
     cameraRef.current = { x: 0, y: 0, zoom: 1 };
     backgroundColorRef.current = DEFAULT_BACKGROUND_COLOR;
     backgroundPatternRef.current = DEFAULT_BACKGROUND_PATTERN;
@@ -438,7 +709,14 @@ export function Whiteboard(): React.JSX.Element {
     createdAtRef.current = new Date().toISOString();
 
     setColor(DEFAULT_COLOR);
+    setTool('pen');
     setLineWidth(DEFAULT_WIDTH);
+    brushRef.current = DEFAULT_BRUSH;
+    opacityRef.current = DEFAULT_OPACITY;
+    drawingSettingsRef.current = createDefaultDrawingSettings();
+    activeDrawingSettingKeyRef.current = DEFAULT_BRUSH;
+    setBrush(DEFAULT_BRUSH);
+    setStrokeOpacity(DEFAULT_OPACITY);
     setBackgroundColor(DEFAULT_BACKGROUND_COLOR);
     setBackgroundPattern(DEFAULT_BACKGROUND_PATTERN);
     setBackgroundSpacing(DEFAULT_BACKGROUND_SPACING);
@@ -540,6 +818,24 @@ export function Whiteboard(): React.JSX.Element {
     window.dispatchEvent(new CustomEvent('michikusa-redraw'));
   };
 
+  const updateColorFromPalette = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const saturation = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    const brightness = 1 - clamp((event.clientY - rect.top) / rect.height, 0, 1);
+    const { h } = rgbToHsv(...Object.values(hexToRgb(color)) as [number, number, number]);
+    const next = hsvToRgb(h, saturation, brightness);
+    setColor(rgbToHex(next.r, next.g, next.b));
+    markDirty();
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const startEyedropper = (target: { kind: 'pen' } | { kind: 'stamp'; definitionId: string }): void => {
+    eyedropperTargetRef.current = target;
+    setIsEyedropping(true);
+    setOpenMenu(null);
+    setStatusMessage('スポイト：色を取得する場所をクリック');
+  };
+
   const updateReview = (updater: (current: ReviewData) => ReviewData): void => {
     const current = reviewRef.current;
     reviewUndoRef.current.push(structuredClone(current));
@@ -618,7 +914,7 @@ export function Whiteboard(): React.JSX.Element {
           markDirty();
           break;
         case 'tool:color-picker':
-          colorInputRef.current?.click();
+          setOpenMenu('color-picker');
           break;
         case 'tool:register-color':
           void window.michikusa.addMenuPreset({
@@ -649,17 +945,83 @@ export function Whiteboard(): React.JSX.Element {
     });
   });
 
+  const renderRecordingFrame = (context: CanvasRenderingContext2D, targetWidth: number, targetHeight: number): void => {
+    if (lastRenderedRecordingVersionRef.current === recordingSceneVersionRef.current) return;
+    lastRenderedRecordingVersionRef.current = recordingSceneVersionRef.current;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const viewportWidth = canvas.clientWidth;
+    const viewportHeight = canvas.clientHeight;
+    const targetAspect = targetWidth / targetHeight;
+    const recordingWidth = Math.max(viewportWidth, viewportHeight * targetAspect);
+    const recordingHeight = Math.max(viewportHeight, viewportWidth / targetAspect);
+    const viewportOffsetX = (recordingWidth - viewportWidth) / 2;
+    const viewportOffsetY = (recordingHeight - viewportHeight) / 2;
+    const outputScaleX = targetWidth / recordingWidth;
+    const outputScaleY = targetHeight / recordingHeight;
+    const camera = cameraRef.current;
+    const recordingCameraX = camera.x + viewportOffsetX;
+    const recordingCameraY = camera.y + viewportOffsetY;
+    const backgroundFill = backgroundColorRef.current === 'black' ? '#111111' : backgroundColorRef.current === 'paper' ? '#F5EEDC' : '#ffffff';
+    const patternColor = backgroundColorRef.current === 'black' ? 'rgba(255,255,255,0.18)' : 'rgba(70,90,110,0.18)';
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.scale(outputScaleX, outputScaleY);
+    context.fillStyle = backgroundFill;
+    context.fillRect(0, 0, recordingWidth, recordingHeight);
+    const rawPatternStep = backgroundSpacingRef.current * camera.zoom;
+    const patternStep = rawPatternStep < 4 ? rawPatternStep * Math.ceil(4 / rawPatternStep) : rawPatternStep;
+    const patternStartX = ((recordingCameraX % patternStep) + patternStep) % patternStep;
+    const patternStartY = ((recordingCameraY % patternStep) + patternStep) % patternStep;
+    context.fillStyle = patternColor;
+    context.strokeStyle = patternColor;
+    context.lineWidth = 1;
+    if (backgroundPatternRef.current === 'dots') {
+      const radius = clamp(1.4 * camera.zoom, .7, 2.5);
+      for (let y = patternStartY; y < recordingHeight; y += patternStep) for (let x = patternStartX; x < recordingWidth; x += patternStep) {
+        context.beginPath(); context.arc(x, y, radius, 0, Math.PI * 2); context.fill();
+      }
+    } else if (backgroundPatternRef.current === 'ruled' || backgroundPatternRef.current === 'grid') {
+      context.beginPath();
+      for (let y = patternStartY; y < recordingHeight; y += patternStep) { context.moveTo(0, y); context.lineTo(recordingWidth, y); }
+      if (backgroundPatternRef.current === 'grid') for (let x = patternStartX; x < recordingWidth; x += patternStep) { context.moveTo(x, 0); context.lineTo(x, recordingHeight); }
+      context.stroke();
+    }
+    context.save();
+    context.translate(recordingCameraX, recordingCameraY);
+    context.scale(camera.zoom, camera.zoom);
+    drawImportedImages(context);
+    const visibleLayerIds = new Set(layersRef.current.filter((layer) => layer.visible !== false).map((layer) => layer.id));
+    strokesRef.current.forEach((stroke) => { if (visibleLayerIds.has(stroke.layerId ?? DEFAULT_LAYER_ID)) drawStrokePath(context, stroke); });
+    if (activeStrokeRef.current) drawStrokePath(context, activeStrokeRef.current);
+    context.restore();
+    if (workspaceModeRef.current === 'review') reviewRef.current.placedStamps.forEach((stamp) => {
+      const definition = reviewRef.current.stampDefinitions.find((item) => item.id === stamp.definitionId);
+      if (!definition) return;
+      const x = recordingCameraX + stamp.x * camera.zoom;
+      const y = recordingCameraY + stamp.y * camera.zoom;
+      const size = definition.size ?? DEFAULT_STAMP_SIZE;
+      const radius = size * (definition.kind === 'theme' ? .94 : .86) / 2;
+      context.save(); context.fillStyle = backgroundColorRef.current === 'black' ? '#202733' : '#F7F3EB'; context.strokeStyle = definition.color; context.lineWidth = 2; context.beginPath();
+      if (definition.kind === 'theme') { context.moveTo(x, y - radius); context.lineTo(x + radius, y); context.lineTo(x, y + radius); context.lineTo(x - radius, y); context.closePath(); } else context.arc(x, y, radius, 0, Math.PI * 2);
+      context.fill(); context.stroke(); context.fillStyle = backgroundColorRef.current === 'black' ? '#F7F3EB' : '#202733';
+      const fontSize = Math.max(14, Math.round(size * .72)); context.font = `${definition.kind === 'theme' ? 600 : 500} ${fontSize}px "BIZ UDPGothic", "Yu Gothic", Meiryo, sans-serif`; context.fillText(definition.name, x + radius + 9, y + fontSize * .35); context.restore();
+    });
+    context.restore();
+  };
+
   const startRecording = async (): Promise<void> => {
     const canvas = canvasRef.current;
     if (!canvas || recordingState !== 'idle') return;
 
     try {
       setShowRecordingSettings(false);
+      lastRenderedRecordingVersionRef.current = -1;
       const manager = new RecordingManager(canvas, {
         onStateChange: setRecordingState,
         onElapsedChange: setRecordingElapsed,
         onAudioLevelChange: setAudioLevel,
-      }, recordingSettings);
+      }, recordingSettings, renderRecordingFrame);
 
       recordingManagerRef.current = manager;
       await manager.start();
@@ -736,6 +1098,13 @@ export function Whiteboard(): React.JSX.Element {
       const isModifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
 
+      if (event.key === 'Escape' && eyedropperTargetRef.current) {
+        eyedropperTargetRef.current = undefined;
+        setIsEyedropping(false);
+        setStatusMessage('スポイトを解除しました');
+        return;
+      }
+
       if (workspaceModeRef.current === 'review') {
         if (event.key === 'Escape') {
           setPlacementDefinitionId(undefined);
@@ -791,11 +1160,46 @@ export function Whiteboard(): React.JSX.Element {
       if (event.code === 'Space') {
         event.preventDefault();
         isSpaceDownRef.current = true;
+        setIsSpaceDown(true);
         return;
+      }
+
+      const target = event.target;
+      const isEditingField = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
+      if (workspaceModeRef.current === 'illustration' && !isModifier && !isEditingField) {
+        if ((key === 'delete' || key === 'backspace') && selectedEditablesRef.current.length) {
+          event.preventDefault();
+          const strokeIds = new Set(selectedEditablesRef.current.filter((item) => item.kind === 'stroke').map((item) => item.id));
+          const imageIds = new Set(selectedEditablesRef.current.filter((item) => item.kind === 'image').map((item) => item.id));
+          strokesRef.current = strokesRef.current.filter((stroke) => !strokeIds.has(stroke.id));
+          importedImagesRef.current = importedImagesRef.current.filter((image) => !imageIds.has(image.id));
+          selectedEditablesRef.current = [];
+          editableGestureRef.current = undefined;
+          markDirty(); requestHistoryRefresh(); window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+          return;
+        }
+        const brushIndex = Number(event.key) - 1;
+        if (brushIndex >= 0 && brushIndex < BRUSH_DEFINITIONS.length) {
+          const nextBrush = BRUSH_DEFINITIONS[brushIndex].id;
+          brushRef.current = nextBrush;
+          setBrush(nextBrush);
+          setTool('pen');
+          markDirty();
+          return;
+        }
+        if (event.key === '[' || event.key === ']') {
+          event.preventDefault();
+          const nextWidth = Math.round(clamp(widthRef.current + (event.key === ']' ? 0.1 : -0.1), 0.1, 48) * 10) / 10;
+          widthRef.current = nextWidth;
+          setLineWidth(nextWidth);
+          markDirty();
+          return;
+        }
       }
 
       if (!isModifier && key === 'p') setTool('pen');
       if (!isModifier && key === 'e') setTool('eraser');
+      if (workspaceModeRef.current === 'illustration' && !isModifier && key === 'v') setTool('select');
       if (!isModifier && key === 'r') {
         event.preventDefault();
         if (recordingState === 'idle') void startRecording();
@@ -806,18 +1210,29 @@ export function Whiteboard(): React.JSX.Element {
     const onKeyUp = (event: KeyboardEvent): void => {
       if (event.code === 'Space') {
         isSpaceDownRef.current = false;
+        setIsSpaceDown(false);
         isPanningRef.current = false;
         lastScreenPointRef.current = null;
         setIsPanning(false);
       }
     };
 
+    const cancelPanning = (): void => {
+      isSpaceDownRef.current = false;
+      isPanningRef.current = false;
+      lastScreenPointRef.current = null;
+      setIsSpaceDown(false);
+      setIsPanning(false);
+    };
+
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', cancelPanning);
 
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', cancelPanning);
     };
   });
 
@@ -835,65 +1250,7 @@ export function Whiteboard(): React.JSX.Element {
       context.save();
       context.translate(camera.x, camera.y);
       context.scale(camera.zoom, camera.zoom);
-      context.strokeStyle = stroke.color;
-      context.lineCap = 'round';
-      context.lineJoin = 'round';
-
-      const points = stroke.points;
-
-      if (points.length === 2) {
-        const pressure = Math.max(
-          0.15,
-          (points[0].pressure + points[1].pressure) / 2,
-        );
-        context.lineWidth = stroke.baseWidth * pressure;
-        context.beginPath();
-        context.moveTo(points[0].x, points[0].y);
-        context.lineTo(points[1].x, points[1].y);
-        context.stroke();
-        context.restore();
-        return;
-      }
-
-      let segmentStart = points[0];
-
-      for (let index = 1; index < points.length - 1; index += 1) {
-        const control = points[index];
-        const segmentEnd = midpoint(control, points[index + 1]);
-        const pressure = Math.max(
-          0.15,
-          (segmentStart.pressure + control.pressure + segmentEnd.pressure) / 3,
-        );
-
-        context.lineWidth = stroke.baseWidth * pressure;
-        context.beginPath();
-        context.moveTo(segmentStart.x, segmentStart.y);
-        context.quadraticCurveTo(
-          control.x,
-          control.y,
-          segmentEnd.x,
-          segmentEnd.y,
-        );
-        context.stroke();
-
-        segmentStart = segmentEnd;
-      }
-
-      const last = points[points.length - 1];
-      const beforeLast = points[points.length - 2];
-      context.lineWidth =
-        stroke.baseWidth *
-        Math.max(0.15, (beforeLast.pressure + last.pressure) / 2);
-      context.beginPath();
-      context.moveTo(segmentStart.x, segmentStart.y);
-      context.quadraticCurveTo(
-        beforeLast.x,
-        beforeLast.y,
-        last.x,
-        last.y,
-      );
-      context.stroke();
-
+      drawStrokePath(context, stroke);
       context.restore();
     };
 
@@ -1188,7 +1545,7 @@ export function Whiteboard(): React.JSX.Element {
       const backgroundFill = backgroundColorRef.current === 'black'
         ? '#111111'
         : backgroundColorRef.current === 'paper'
-          ? '#fffefb'
+          ? '#F5EEDC'
           : '#ffffff';
       const patternColor = backgroundColorRef.current === 'black'
         ? 'rgba(255,255,255,0.18)'
@@ -1228,13 +1585,32 @@ export function Whiteboard(): React.JSX.Element {
         }
         context.stroke();
       }
+      context.save();
+      context.translate(camera.x, camera.y);
+      context.scale(camera.zoom, camera.zoom);
+      drawImportedImages(context);
+      context.restore();
       const visibleLayerIds = new Set(layersRef.current.filter((layer) => layer.visible !== false).map((layer) => layer.id));
       strokesRef.current.forEach((stroke) => {
         if (visibleLayerIds.has(stroke.layerId ?? DEFAULT_LAYER_ID)) drawStroke(stroke);
       });
       if (activeStrokeRef.current) drawStroke(activeStrokeRef.current);
+      if (workspaceModeRef.current === 'illustration') {
+        const bounds = getEditableBounds();
+        if (bounds) {
+          context.save(); context.translate(camera.x, camera.y); context.scale(camera.zoom, camera.zoom);
+          context.strokeStyle = '#2f6f55'; context.lineWidth = 1.5 / camera.zoom; context.setLineDash([5 / camera.zoom, 4 / camera.zoom]);
+          context.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+          context.setLineDash([]); context.fillStyle = '#fff'; context.beginPath(); context.arc(bounds.x + bounds.width, bounds.y + bounds.height, 6 / camera.zoom, 0, Math.PI * 2); context.fill(); context.stroke(); context.restore();
+        }
+        const marquee = marqueeRectRef.current;
+        if (marquee) {
+          context.save(); context.translate(camera.x, camera.y); context.scale(camera.zoom, camera.zoom); context.fillStyle = 'rgba(47,111,85,.10)'; context.strokeStyle = '#2f6f55'; context.lineWidth = 1 / camera.zoom; context.setLineDash([4 / camera.zoom, 3 / camera.zoom]); context.fillRect(marquee.x, marquee.y, marquee.width, marquee.height); context.strokeRect(marquee.x, marquee.y, marquee.width, marquee.height); context.restore();
+        }
+      }
       drawReviewOverlay();
       context.restore();
+      recordingSceneVersionRef.current += 1;
     };
 
     const resize = (): void => {
@@ -1266,6 +1642,25 @@ export function Whiteboard(): React.JSX.Element {
       position.x <= canvas.clientWidth &&
       position.y <= canvas.clientHeight;
 
+    const sampleDisplayedColor = (position: { x: number; y: number }, target: { kind: 'pen' } | { kind: 'stamp'; definitionId: string } = { kind: 'pen' }): void => {
+      const scaleX = canvas.width / canvas.clientWidth;
+      const scaleY = canvas.height / canvas.clientHeight;
+      const pixelX = clamp(Math.floor(position.x * scaleX), 0, canvas.width - 1);
+      const pixelY = clamp(Math.floor(position.y * scaleY), 0, canvas.height - 1);
+      const [red, green, blue] = context.getImageData(pixelX, pixelY, 1, 1).data;
+      const sampledColor = rgbToHex(red, green, blue);
+      if (target.kind === 'stamp') {
+        updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === target.definitionId ? { ...definition, color: sampledColor } : definition) }));
+      } else {
+        colorRef.current = sampledColor;
+        setColor(sampledColor);
+        markDirty();
+      }
+      eyedropperTargetRef.current = undefined;
+      setIsEyedropping(false);
+      setStatusMessage(`スポイト: ${sampledColor.toUpperCase()}`);
+    };
+
     const rememberPointerPosition = (event: PointerEvent): void => {
       const position = pointerPosition(event);
       const isInside = isInsideCanvas(position);
@@ -1292,7 +1687,7 @@ export function Whiteboard(): React.JSX.Element {
       incoming.pressure =
         pointerEvent.pointerType === 'pen' && pointerEvent.pressure > 0
           ? pointerEvent.pressure
-          : 0.65;
+          : 1;
 
       const previous = stroke.points[stroke.points.length - 1];
       if (!previous) {
@@ -1310,7 +1705,8 @@ export function Whiteboard(): React.JSX.Element {
     };
 
     const eraseAt = (world: Point): void => {
-      const radiusWorld = ERASER_RADIUS_SCREEN / cameraRef.current.zoom;
+      const inputWidthScale = zoomCompensatedInputWidthRef.current ? 1 / cameraRef.current.zoom : 1;
+      const radiusWorld = widthRef.current * inputWidthScale / 2;
       let changed = false;
       strokesRef.current = strokesRef.current.flatMap((stroke) => {
         if ((stroke.layerId ?? DEFAULT_LAYER_ID) !== activeLayerIdRef.current) return [stroke];
@@ -1351,6 +1747,11 @@ export function Whiteboard(): React.JSX.Element {
       rememberPointerPosition(event);
       canvas.setPointerCapture(event.pointerId);
       const screen = pointerPosition(event);
+
+      if (event.button === 0 && eyedropperTargetRef.current) {
+        sampleDisplayedColor(screen, eyedropperTargetRef.current);
+        return;
+      }
 
       if (isSpaceDownRef.current || event.button === 1) {
         isPanningRef.current = true;
@@ -1406,6 +1807,40 @@ export function Whiteboard(): React.JSX.Element {
         return;
       }
 
+      if (workspaceModeRef.current === 'illustration' && toolRef.current === 'select') {
+        const visibleLayerIds = new Set(layersRef.current.filter((layer) => layer.visible !== false).map((layer) => layer.id));
+        if (selectionModeRef.current === 'marquee') {
+          selectedEditablesRef.current = [];
+          marqueeRectRef.current = { x: world.x, y: world.y, width: 0, height: 0 };
+          editableGestureRef.current = { mode: 'marquee', start: world };
+          redraw();
+          return;
+        }
+        const currentBounds = getEditableBounds();
+        if (currentBounds && Math.hypot(world.x - (currentBounds.x + currentBounds.width), world.y - (currentBounds.y + currentBounds.height)) <= 10 / cameraRef.current.zoom) {
+          editableGestureRef.current = { mode: 'scale', start: world, snapshot: snapshotEditableSelection(), bounds: currentBounds };
+          return;
+        }
+        const hitStroke = [...strokesRef.current].reverse().find((stroke) => {
+          if (!visibleLayerIds.has(stroke.layerId ?? DEFAULT_LAYER_ID)) return false;
+          const threshold = stroke.baseWidth / 2 + 6 / cameraRef.current.zoom;
+          return stroke.points.some((point, index) => index > 0 && distancePointToSegment(world, stroke.points[index - 1], point) <= threshold);
+        });
+        const hitImage = !hitStroke ? [...importedImagesRef.current].reverse().find((image) => visibleLayerIds.has(image.layerId ?? DEFAULT_LAYER_ID) && world.x >= image.x && world.x <= image.x + image.width && world.y >= image.y && world.y <= image.y + image.height) : undefined;
+        const hit: EditableSelection | undefined = hitStroke ? { kind: 'stroke', id: hitStroke.id } : hitImage ? { kind: 'image', id: hitImage.id } : undefined;
+        if (hit) {
+          const alreadySelected = selectedEditablesRef.current.some((item) => item.kind === hit.kind && item.id === hit.id);
+          if (event.shiftKey) selectedEditablesRef.current = alreadySelected ? selectedEditablesRef.current.filter((item) => item.kind !== hit.kind || item.id !== hit.id) : [...selectedEditablesRef.current, hit];
+          else if (!alreadySelected) selectedEditablesRef.current = [hit];
+          editableGestureRef.current = { mode: 'move', start: world, snapshot: snapshotEditableSelection(), bounds: getEditableBounds() };
+        } else {
+          selectedEditablesRef.current = [];
+          editableGestureRef.current = undefined;
+        }
+        redraw();
+        return;
+      }
+
       if (toolRef.current === 'eraser') {
         isErasingRef.current = true;
         eraseAt(world);
@@ -1415,7 +1850,7 @@ export function Whiteboard(): React.JSX.Element {
       world.pressure =
         event.pointerType === 'pen' && event.pressure > 0
           ? event.pressure
-          : 0.65;
+          : 1;
 
       let drawableLayerId = activeLayerIdRef.current;
       let drawableLayer = layersRef.current.find((layer) => layer.id === drawableLayerId);
@@ -1434,7 +1869,9 @@ export function Whiteboard(): React.JSX.Element {
       activeStrokeRef.current = {
         id: makeId(),
         color: colorRef.current,
-        baseWidth: widthRef.current,
+        baseWidth: widthRef.current * (zoomCompensatedInputWidthRef.current ? 1 / cameraRef.current.zoom : 1),
+        brush: brushRef.current,
+        opacity: opacityRef.current,
         layerId: drawableLayerId,
         points: [world],
       };
@@ -1470,6 +1907,29 @@ export function Whiteboard(): React.JSX.Element {
         const stampId = draggingStampRef.current;
         updateReview((current) => ({ ...current, placedStamps: current.placedStamps.map((stamp) => stamp.id === stampId ? { ...stamp, x: world.x, y: world.y } : stamp) }));
         return;
+      }
+
+      if (editableGestureRef.current) {
+        const world = screenToWorld(screen.x, screen.y);
+        const gesture = editableGestureRef.current;
+        if (gesture.mode === 'marquee') {
+          const left = Math.min(gesture.start.x, world.x); const top = Math.min(gesture.start.y, world.y); const right = Math.max(gesture.start.x, world.x); const bottom = Math.max(gesture.start.y, world.y);
+          marqueeRectRef.current = { x: left, y: top, width: right - left, height: bottom - top };
+          const candidates: EditableSelection[] = [
+            ...strokesRef.current.filter((stroke) => layersRef.current.find((layer) => layer.id === (stroke.layerId ?? DEFAULT_LAYER_ID))?.visible !== false).map((stroke) => ({ kind: 'stroke' as const, id: stroke.id })),
+            ...importedImagesRef.current.filter((image) => layersRef.current.find((layer) => layer.id === (image.layerId ?? DEFAULT_LAYER_ID))?.visible !== false).map((image) => ({ kind: 'image' as const, id: image.id })),
+          ];
+          selectedEditablesRef.current = candidates.filter((candidate) => { const bounds = getEditableBounds([candidate]); return bounds && bounds.x <= right && bounds.x + bounds.width >= left && bounds.y <= bottom && bounds.y + bounds.height >= top; });
+          redraw(); return;
+        }
+        const snapshot = gesture.snapshot; const bounds = gesture.bounds;
+        if (!snapshot || !bounds) return;
+        const dx = world.x - gesture.start.x; const dy = world.y - gesture.start.y;
+        const scaleX = gesture.mode === 'scale' ? Math.max(.05, (world.x - bounds.x) / Math.max(bounds.width, .001)) : 1;
+        const scaleY = gesture.mode === 'scale' ? Math.max(.05, (world.y - bounds.y) / Math.max(bounds.height, .001)) : 1;
+        strokesRef.current = strokesRef.current.map((stroke) => { const source = snapshot.strokes.find((item) => item.id === stroke.id); return source ? { ...stroke, baseWidth: gesture.mode === 'scale' ? source.baseWidth * Math.sqrt(scaleX * scaleY) : source.baseWidth, points: source.points.map((point) => ({ ...point, x: gesture.mode === 'scale' ? bounds.x + (point.x - bounds.x) * scaleX : point.x + dx, y: gesture.mode === 'scale' ? bounds.y + (point.y - bounds.y) * scaleY : point.y + dy })) } : stroke; });
+        importedImagesRef.current = importedImagesRef.current.map((image) => { const source = snapshot.images.find((item) => item.id === image.id); return source ? { ...image, x: gesture.mode === 'scale' ? bounds.x + (source.x - bounds.x) * scaleX : source.x + dx, y: gesture.mode === 'scale' ? bounds.y + (source.y - bounds.y) * scaleY : source.y + dy, width: source.width * scaleX, height: source.height * scaleY } : image; });
+        markDirty(); redraw(); return;
       }
 
       if (isErasingRef.current) {
@@ -1509,6 +1969,14 @@ export function Whiteboard(): React.JSX.Element {
 
       if (draggingStampRef.current) {
         draggingStampRef.current = undefined;
+        return;
+      }
+
+      if (editableGestureRef.current) {
+        editableGestureRef.current = undefined;
+        marqueeRectRef.current = undefined;
+        requestHistoryRefresh();
+        window.dispatchEvent(new CustomEvent('michikusa-redraw'));
         return;
       }
 
@@ -1619,10 +2087,14 @@ export function Whiteboard(): React.JSX.Element {
     };
 
     const onContextMenu = (event: MouseEvent): void => {
-      if (workspaceModeRef.current !== 'review') return;
       event.preventDefault();
-      setPlacementDefinitionId(undefined);
-      placementDefinitionRef.current = undefined;
+      const position = clientToCanvasPosition(event.clientX, event.clientY);
+      if (!isInsideCanvas(position)) return;
+
+      const shortcutTarget = workspaceModeRef.current === 'review'
+        ? { kind: 'stamp' as const, definitionId: toolbarStampDefinitionId }
+        : { kind: 'pen' as const };
+      sampleDisplayedColor(position, shortcutTarget);
     };
 
     const onExternalRedraw = (): void => redraw();
@@ -1671,8 +2143,9 @@ export function Whiteboard(): React.JSX.Element {
     : redoRef.current.length > 0;
 
   const switchToNextWorkspaceMode = (): void => {
-    const currentIndex = WORKSPACE_MODES.findIndex((mode) => mode.id === workspaceMode);
-    const nextMode = WORKSPACE_MODES[(currentIndex + 1) % WORKSPACE_MODES.length];
+    const nextMode = workspaceMode === 'create'
+      ? WORKSPACE_MODES.find((mode) => mode.id === 'review')!
+      : WORKSPACE_MODES.find((mode) => mode.id === 'create')!;
     const defaultStampDefinitionId = reviewRef.current.stampDefinitions.find((definition) => definition.kind === 'theme')?.id ?? 'theme';
     setWorkspaceMode(nextMode.id);
     setToolbarStampDefinitionId(defaultStampDefinitionId);
@@ -1744,6 +2217,90 @@ export function Whiteboard(): React.JSX.Element {
     setReviewSummaryPosition(previousPosition);
     window.dispatchEvent(new CustomEvent('michikusa-redraw'));
   };
+
+  const exportCanvasCrop = async (crop: ExportCropRequest): Promise<void> => {
+    await Promise.all(importedImagesRef.current.map(loadCanvasImage));
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = crop.outputWidth;
+    exportCanvas.height = crop.outputHeight;
+    const exportContext = exportCanvas.getContext('2d');
+    if (!exportContext) return;
+    const camera = cameraRef.current;
+    const worldX = (crop.x - camera.x) / camera.zoom;
+    const worldY = (crop.y - camera.y) / camera.zoom;
+    const worldWidth = crop.width / camera.zoom;
+    const worldHeight = crop.height / camera.zoom;
+    const exportScaleX = crop.outputWidth / worldWidth;
+    const exportScaleY = crop.outputHeight / worldHeight;
+    const exportScale = Math.sqrt(exportScaleX * exportScaleY);
+    const backgroundFill = backgroundColorRef.current === 'black' ? '#111111' : backgroundColorRef.current === 'paper' ? '#F5EEDC' : '#ffffff';
+    const patternColor = backgroundColorRef.current === 'black' ? 'rgba(255,255,255,0.18)' : 'rgba(70,90,110,0.18)';
+    exportContext.fillStyle = backgroundFill;
+    exportContext.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+    exportContext.save();
+    exportContext.setTransform(exportScaleX, 0, 0, exportScaleY, -worldX * exportScaleX, -worldY * exportScaleY);
+    exportContext.fillStyle = patternColor;
+    exportContext.strokeStyle = patternColor;
+    exportContext.lineWidth = 1 / exportScale;
+    const spacing = backgroundSpacingRef.current;
+    const startX = Math.floor(worldX / spacing) * spacing;
+    const startY = Math.floor(worldY / spacing) * spacing;
+    if (backgroundPatternRef.current === 'dots') {
+      for (let y = startY; y <= worldY + worldHeight; y += spacing) for (let x = startX; x <= worldX + worldWidth; x += spacing) {
+        exportContext.beginPath(); exportContext.arc(x, y, 1.4, 0, Math.PI * 2); exportContext.fill();
+      }
+    } else if (backgroundPatternRef.current === 'ruled' || backgroundPatternRef.current === 'grid') {
+      exportContext.beginPath();
+      for (let y = startY; y <= worldY + worldHeight; y += spacing) { exportContext.moveTo(worldX, y); exportContext.lineTo(worldX + worldWidth, y); }
+      if (backgroundPatternRef.current === 'grid') for (let x = startX; x <= worldX + worldWidth; x += spacing) { exportContext.moveTo(x, worldY); exportContext.lineTo(x, worldY + worldHeight); }
+      exportContext.stroke();
+    }
+    drawImportedImages(exportContext);
+    const visibleLayerIds = new Set(layersRef.current.filter((layer) => layer.visible !== false).map((layer) => layer.id));
+    strokesRef.current.forEach((stroke) => { if (visibleLayerIds.has(stroke.layerId ?? DEFAULT_LAYER_ID)) drawStrokePath(exportContext, stroke); });
+    if (workspaceModeRef.current === 'review') reviewRef.current.placedStamps.forEach((stamp) => {
+      const definition = reviewRef.current.stampDefinitions.find((item) => item.id === stamp.definitionId);
+      if (!definition) return;
+      const stampSizeWorld = (definition.size ?? DEFAULT_STAMP_SIZE) / camera.zoom;
+      const radius = stampSizeWorld * (definition.kind === 'theme' ? 0.94 : 0.86) / 2;
+      exportContext.save();
+      exportContext.fillStyle = backgroundColorRef.current === 'black' ? '#202733' : '#F7F3EB';
+      exportContext.strokeStyle = definition.color;
+      exportContext.lineWidth = 2 / camera.zoom;
+      exportContext.beginPath();
+      if (definition.kind === 'theme') { exportContext.moveTo(stamp.x, stamp.y - radius); exportContext.lineTo(stamp.x + radius, stamp.y); exportContext.lineTo(stamp.x, stamp.y + radius); exportContext.lineTo(stamp.x - radius, stamp.y); exportContext.closePath(); }
+      else exportContext.arc(stamp.x, stamp.y, radius, 0, Math.PI * 2);
+      exportContext.fill(); exportContext.stroke();
+      exportContext.fillStyle = backgroundColorRef.current === 'black' ? '#F7F3EB' : '#202733';
+      const fontSize = Math.max(14, Math.round((definition.size ?? DEFAULT_STAMP_SIZE) * .72)) / camera.zoom;
+      exportContext.font = `${definition.kind === 'theme' ? 600 : 500} ${fontSize}px "BIZ UDPGothic", "Yu Gothic", Meiryo, sans-serif`;
+      exportContext.fillText(definition.name, stamp.x + radius + 9 / camera.zoom, stamp.y + fontSize * .35);
+      exportContext.restore();
+    });
+    exportContext.restore();
+    const blob = await new Promise<Blob>((resolve, reject) => exportCanvas.toBlob((value) => value ? resolve(value) : reject(new Error('PNGを生成できませんでした。')), 'image/png'));
+    const projectName = (currentPath?.split(/[\\/]/).pop() ?? '無題.m45').replace(/\.m45$/i, '');
+    const result = await window.michikusa.savePng(new Uint8Array(await blob.arrayBuffer()), `${projectName}.png`);
+    if (!result.canceled) { setShowImageExport(false); setStatusMessage(`画像を保存しました: ${result.filePath}`); }
+  };
+  const importImage = async (): Promise<void> => {
+    const result = await window.michikusa.openImage();
+    if (result.canceled) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const item: ImportedCanvasImage = { id: crypto.randomUUID(), name: result.name, dataUrl: result.dataUrl, x: 0, y: 0, width: 1, height: 1, layerId: activeLayerIdRef.current };
+    const image = await loadCanvasImage(item);
+    const camera = cameraRef.current;
+    const displayScale = Math.min(1, canvas.clientWidth * .7 / image.naturalWidth, canvas.clientHeight * .7 / image.naturalHeight);
+    item.width = image.naturalWidth * displayScale / camera.zoom;
+    item.height = image.naturalHeight * displayScale / camera.zoom;
+    item.x = (canvas.clientWidth / 2 - camera.x) / camera.zoom - item.width / 2;
+    item.y = (canvas.clientHeight / 2 - camera.y) / camera.zoom - item.height / 2;
+    importedImagesRef.current.push(item);
+    markDirty();
+    setStatusMessage(`画像を取り込みました: ${result.name}`);
+    window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+  };
   const updateLayers = (updater: (current: LayerDefinition[]) => LayerDefinition[]): void => {
     const next = updater(layersRef.current);
     layersRef.current = next;
@@ -1761,6 +2318,7 @@ export function Whiteboard(): React.JSX.Element {
     if (layersRef.current.length <= 1) return;
     const remaining = layersRef.current.filter((layer) => layer.id !== id);
     strokesRef.current = strokesRef.current.filter((stroke) => (stroke.layerId ?? DEFAULT_LAYER_ID) !== id);
+    importedImagesRef.current = importedImagesRef.current.filter((image) => (image.layerId ?? DEFAULT_LAYER_ID) !== id);
     updateLayers(() => remaining);
     if (activeLayerIdRef.current === id) {
       const nextActiveId = remaining[remaining.length - 1].id;
@@ -1779,13 +2337,40 @@ export function Whiteboard(): React.JSX.Element {
     <section className="workspace">
       <nav className="app-menu-bar" onMouseLeave={() => setOpenMenu(null)}>
         <div className="app-menu">
-          <button onClick={() => setOpenMenu(openMenu === 'file' ? null : 'file')}>ファイル</button>
+          <button onClick={() => { setFileMenuPage('root'); setOpenMenu(openMenu === 'file' ? null : 'file'); }}>ファイル</button>
           {openMenu === 'file' && <div className="app-menu-popup">
+            {fileMenuPage === 'root' && <>
             <button onClick={() => { newProject(); setOpenMenu(null); }}>新規 <kbd>Ctrl+N</kbd></button>
             <button onClick={() => { void openProject(); setOpenMenu(null); }}>開く <kbd>Ctrl+O</kbd></button>
+            <button onClick={() => { void importImage(); setOpenMenu(null); }}>画像を取り込む</button>
             <button onClick={() => { void save(false); setOpenMenu(null); }}>保存 <kbd>Ctrl+S</kbd></button>
             <button onClick={() => { void save(true); setOpenMenu(null); }}>名前を付けて保存</button>
+            <button onClick={() => { setShowImageExport(true); setOpenMenu(null); }}>画像として保存</button>
+            <div className="menu-section-title">モード</div>
+            <button onClick={() => { setWorkspaceMode('create'); setOpenMenu(null); }}>思考モード</button>
+            <button onClick={() => { setWorkspaceMode('review'); setOpenMenu(null); }}>分析モード</button>
+            <button onClick={() => { setWorkspaceMode('illustration'); setOpenMenu(null); }}>イラストモード</button>
+            <div className="menu-section-title">環境</div>
+            <button onClick={() => setFileMenuPage('settings')}>設定 <span aria-hidden="true">›</span></button>
             <button onClick={() => void window.michikusa.quit()}>終了</button>
+            </>}
+            {fileMenuPage === 'settings' && <>
+            <button onClick={() => setFileMenuPage('root')}>← ファイル</button>
+            <div className="menu-section-title">設定</div>
+            <button onClick={() => setFileMenuPage('pen')}>ペン <span aria-hidden="true">›</span></button>
+            </>}
+            {fileMenuPage === 'pen' && <>
+            <button onClick={() => setFileMenuPage('settings')}>← 設定</button>
+            <div className="menu-section-title">ペン・線の太さの計算方法</div>
+            <button onClick={() => {
+              changeZoomCompensatedInputWidth(false);
+              setOpenMenu(null);
+            }}>{!zoomCompensatedInputWidth ? '✓ ' : ''}キャンバス基準</button>
+            <button onClick={() => {
+              changeZoomCompensatedInputWidth(true);
+              setOpenMenu(null);
+            }}>{zoomCompensatedInputWidth ? '✓ ' : ''}画面上の指定幅を維持</button>
+            </>}
           </div>}
         </div>
         <div className="app-menu">
@@ -1800,6 +2385,9 @@ export function Whiteboard(): React.JSX.Element {
           {openMenu === 'tools' && <div className="app-menu-popup app-menu-popup-wide">
             <button onClick={() => { setTool('pen'); setOpenMenu(null); }}>ペン</button>
             <button onClick={() => { setTool('eraser'); setOpenMenu(null); }}>消しゴム</button>
+            {workspaceMode === 'illustration' && <button onClick={() => { setTool('select'); setOpenMenu(null); }}>選択</button>}
+            <div className="menu-section-title">ペンの種類</div>
+            {BRUSH_DEFINITIONS.map((definition) => <button key={definition.id} onClick={() => { brushRef.current = definition.id; setBrush(definition.id); setTool('pen'); markDirty(); setOpenMenu(null); }}>{brush === definition.id ? '✓ ' : ''}{definition.label}</button>)}
             <div className="menu-section-title">色プリセット</div>
             {colorPresets.map((preset) => <div className="preset-row" key={preset}>
               <button className="preset-select" onClick={() => { setColor(preset); markDirty(); setOpenMenu(null); }}>
@@ -1872,10 +2460,18 @@ export function Whiteboard(): React.JSX.Element {
           >
             {currentWorkspaceMode.label}
           </button>
+          <div className="tool-group mode-history-controls">
+            <button type="button" className="history-icon-button" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
+              ↶
+            </button>
+            <button type="button" className="history-icon-button" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)" aria-label="Redo">
+              ↷
+            </button>
+          </div>
         </div>
 
-        <div className="mode-specific-tools">
-        {workspaceMode === 'create' ? <><div className="tool-group mode-tool-primary">
+        <div className={`mode-specific-tools mode-tools-${workspaceMode}`}>
+        {workspaceMode !== 'review' ? <><div className="tool-group mode-tool-primary">
           <button
             type="button"
             className={tool === 'pen' ? 'active' : ''}
@@ -1895,33 +2491,87 @@ export function Whiteboard(): React.JSX.Element {
         </div>
 
         <div className="tool-group mode-tool-secondary">
-          <label className="color-control" title="線の色">
+          <div className={`color-control color-picker-control${openMenu === 'color-picker' ? ' picker-open' : ''}`} title="線の色">
             <span>色</span>
-            <input
-              ref={colorInputRef}
-              type="color"
-              value={color}
-              onChange={(event) => {
-                setColor(event.target.value);
-                markDirty();
-              }}
-            />
-          </label>
+            <button
+              type="button"
+              className="color-picker-trigger"
+              onClick={() => setOpenMenu(openMenu === 'color-picker' ? null : 'color-picker')}
+              aria-label="線の色を選択"
+            >
+              <span className="color-picker-trigger-swatch" style={{ backgroundColor: color }} />
+            </button>
+            {openMenu === 'color-picker' && <div className="color-picker-popover">
+              {(() => {
+                const rgb = hexToRgb(color);
+                const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+                return <>
+                  <div
+                    className="saturation-value-picker"
+                    style={{ backgroundColor: `hsl(${hsv.h} 100% 50%)` }}
+                    onPointerDown={updateColorFromPalette}
+                    onPointerMove={(event) => {
+                      if (event.buttons === 1) updateColorFromPalette(event);
+                    }}
+                  >
+                    <span style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
+                  </div>
+                  <div className="hue-picker-row">
+                    <button type="button" className="eyedropper-icon" title="スポイト" aria-label="スポイト" onClick={() => startEyedropper({ kind: 'pen' })}>
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.4 3.2 1.4 1.4a2 2 0 0 1 0 2.8l-3.1 3.1 1.1 1.1-1.9 1.9-1.1-1.1-7.7 7.7-4.2.7.7-4.2 7.7-7.7-1.1-1.1 1.9-1.9 1.1 1.1 3.1-3.1a2 2 0 0 1 2.8 0ZM6.4 17.5l-.3 1.4 1.4-.3 7-7-1.1-1.1Z" /></svg>
+                    </button>
+                    <span className="current-color-preview" style={{ backgroundColor: color }} title="キャンバスを右クリックして色を取得" />
+                    <input
+                      className="hue-slider"
+                      type="range"
+                      min="0"
+                      max="359"
+                      value={Math.round(hsv.h)}
+                      onChange={(event) => {
+                        const next = hsvToRgb(Number(event.target.value), hsv.s, hsv.v);
+                        setColor(rgbToHex(next.r, next.g, next.b));
+                        markDirty();
+                      }}
+                      aria-label="色相"
+                      style={{ '--selected-hue-color': `hsl(${hsv.h} 100% 50%)` } as React.CSSProperties}
+                    />
+                  </div>
+                </>;
+              })()}
+              <div className="color-preset-heading">プリセット</div>
+              <div className="color-preset-grid">
+                {colorPresets.map((preset) => <button
+                  type="button"
+                  key={preset}
+                  className={`color-preset-swatch${preset.toLowerCase() === color.toLowerCase() ? ' selected' : ''}`}
+                  style={{ backgroundColor: preset }}
+                  onClick={() => {
+                    setColor(preset);
+                    markDirty();
+                    setOpenMenu(null);
+                  }}
+                  aria-label={`プリセット色 ${preset}`}
+                  title="プリセット色"
+                />)}
+              </div>
+              <button type="button" className="register-current-color" onClick={() => void window.michikusa.addMenuPreset({ type: 'color', value: colorRef.current }).then(refreshMenuPresets)}>現在の色を登録</button>
+            </div>}
+          </div>
 
           <label className="width-control" title="ペンのサイズ">
             <span>サイズ</span>
             <input
               type="range"
-              min="1"
+              min="0.1"
               max="24"
-              step="0.5"
+              step="0.1"
               value={lineWidth}
               onChange={(event) => {
                 setLineWidth(Number(event.target.value));
                 markDirty();
               }}
             />
-            <output>{lineWidth.toFixed(1)}</output>
+            <output>{lineWidth.toFixed(1)} px</output>
           </label>
         </div></> : <><div className="tool-group mode-tool-primary stamp-toolbar">
           <label>
@@ -1946,29 +2596,47 @@ export function Whiteboard(): React.JSX.Element {
         </div>
 
         <div className="tool-group mode-tool-secondary stamp-properties">
-          <label className="color-control" title="スタンプの色">
+          <div className={`color-control color-picker-control${openMenu === 'stamp-color-picker' ? ' picker-open' : ''}`} title="スタンプの色">
             <span>色</span>
-            <input type="color" value={selectedStampDefinition?.color ?? '#000000'} disabled={!selectedStampDefinition} onChange={(event) => {
-              if (selectedStampDefinition) updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, color: event.target.value } : definition) }));
-            }} />
-          </label>
+            <button type="button" className="color-picker-trigger" disabled={!selectedStampDefinition} onClick={() => setOpenMenu(openMenu === 'stamp-color-picker' ? null : 'stamp-color-picker')} aria-label="スタンプの色を選択">
+              <span className="color-picker-trigger-swatch" style={{ backgroundColor: selectedStampDefinition?.color ?? '#000000' }} />
+            </button>
+            {openMenu === 'stamp-color-picker' && selectedStampDefinition && <div className="color-picker-popover">
+              {(() => {
+                const stampColor = selectedStampDefinition.color;
+                const rgb = hexToRgb(stampColor);
+                const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+                const applyColor = (nextColor: string): void => updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, color: nextColor } : definition) }));
+                const applyHsv = (h: number, s: number, v: number): void => { const next = hsvToRgb(h, s, v); applyColor(rgbToHex(next.r, next.g, next.b)); };
+                const updatePalette = (event: React.PointerEvent<HTMLDivElement>): void => {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  applyHsv(hsv.h, clamp((event.clientX - rect.left) / rect.width, 0, 1), 1 - clamp((event.clientY - rect.top) / rect.height, 0, 1));
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                };
+                return <>
+                  <div className="saturation-value-picker" style={{ backgroundColor: `hsl(${hsv.h} 100% 50%)` }} onPointerDown={updatePalette} onPointerMove={(event) => { if (event.buttons === 1) updatePalette(event); }}>
+                    <span style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
+                  </div>
+                  <div className="hue-picker-row stamp-hue-picker-row">
+                    <button type="button" className="eyedropper-icon" title="スポイト" aria-label="スポイト" onClick={() => startEyedropper({ kind: 'stamp', definitionId: selectedStampDefinition.id })}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.4 3.2 1.4 1.4a2 2 0 0 1 0 2.8l-3.1 3.1 1.1 1.1-1.9 1.9-1.1-1.1-7.7 7.7-4.2.7.7-4.2 7.7-7.7-1.1-1.1 1.9-1.9 1.1 1.1 3.1-3.1a2 2 0 0 1 2.8 0ZM6.4 17.5l-.3 1.4 1.4-.3 7-7-1.1-1.1Z" /></svg></button>
+                    <span className="current-color-preview" style={{ backgroundColor: stampColor }} />
+                    <input className="hue-slider" type="range" min="0" max="359" value={Math.round(hsv.h)} onChange={(event) => applyHsv(Number(event.target.value), hsv.s, hsv.v)} aria-label="スタンプの色相" style={{ '--selected-hue-color': `hsl(${hsv.h} 100% 50%)` } as React.CSSProperties} />
+                  </div>
+                </>;
+              })()}
+              <div className="color-preset-heading">プリセット</div>
+              <div className="color-preset-grid">{colorPresets.map((preset) => <button type="button" key={preset} className={`color-preset-swatch${preset.toLowerCase() === selectedStampDefinition.color.toLowerCase() ? ' selected' : ''}`} style={{ backgroundColor: preset }} onClick={() => { updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, color: preset } : definition) })); setOpenMenu(null); }} aria-label="プリセット色" />)}</div>
+              <button type="button" className="register-current-color" onClick={() => void window.michikusa.addMenuPreset({ type: 'color', value: selectedStampDefinition.color }).then(refreshMenuPresets)}>現在の色を登録</button>
+            </div>}
+          </div>
           <label className="width-control" title="スタンプのサイズ">
             <span>サイズ</span>
             <input type="range" min="12" max="80" step="2" value={selectedStampDefinition?.size ?? DEFAULT_STAMP_SIZE} disabled={!selectedStampDefinition} onInput={(event) => {
               if (selectedStampDefinition) updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, size: Number(event.currentTarget.value) } : definition) }));
             }} />
-            <output>{selectedStampDefinition?.size ?? DEFAULT_STAMP_SIZE}</output>
+            <output>{selectedStampDefinition?.size ?? DEFAULT_STAMP_SIZE} px</output>
           </label>
         </div></>}
-        </div>
-
-        <div className="tool-group">
-          <button type="button" className="history-icon-button" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
-            ↶
-          </button>
-          <button type="button" className="history-icon-button" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)" aria-label="Redo">
-            ↷
-          </button>
         </div>
 
         <div className="tool-group recording-controls">
@@ -1998,7 +2666,18 @@ export function Whiteboard(): React.JSX.Element {
               .toString()
               .padStart(2, '0')}
           </span>}
-          {recordingSettings.showAudioMeter && <div className="audio-meter" title="入力音量">
+          <button
+            type="button"
+            className={`microphone-toggle ${recordingSettings.microphoneEnabled ? 'microphone-enabled' : 'microphone-disabled'}`}
+            onClick={() => setRecordingSettings((settings) => ({ ...settings, microphoneEnabled: !settings.microphoneEnabled }))}
+            disabled={recordingState !== 'idle'}
+            title={recordingSettings.microphoneEnabled ? 'マイクをオフにする' : 'マイクをオンにする'}
+            aria-label={recordingSettings.microphoneEnabled ? 'マイク：オン' : 'マイク：オフ'}
+            aria-pressed={recordingSettings.microphoneEnabled}
+          >
+            {recordingSettings.microphoneEnabled ? '🎙' : '🔇'}
+          </button>
+          {recordingSettings.showAudioMeter && <div className="audio-meter" title={recordingSettings.microphoneEnabled ? '入力音量' : 'マイクはオフです'}>
             <span style={{ width: `${Math.round(audioLevel * 100)}%` }} />
           </div>}
           <button
@@ -2011,9 +2690,10 @@ export function Whiteboard(): React.JSX.Element {
             ⚙
           </button>
           {showRecordingSettings && <div className="recording-settings-panel">
+            <label className="settings-check"><input type="checkbox" checked={recordingSettings.microphoneEnabled} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, microphoneEnabled: event.target.checked }))} />マイク音声を録音</label>
             <label>
               <span>入力音声</span>
-              <select value={recordingSettings.audioDeviceId} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, audioDeviceId: event.target.value }))}>
+              <select disabled={!recordingSettings.microphoneEnabled} value={recordingSettings.audioDeviceId} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, audioDeviceId: event.target.value }))}>
                 <option value="">既定のマイク</option>
                 {audioDevices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `マイク ${index + 1}`}</option>)}
               </select>
@@ -2024,6 +2704,7 @@ export function Whiteboard(): React.JSX.Element {
                 <option value="720p">720p</option>
                 <option value="1080p">1080p</option>
                 <option value="1440p">1440p</option>
+                <option value="4k">4K</option>
               </select>
             </label>
             <label>
@@ -2054,7 +2735,7 @@ export function Whiteboard(): React.JSX.Element {
       </header>
 
       <div className="whiteboard-shell">
-        {workspaceMode === 'create' && <LayerPanel
+        {workspaceMode === 'illustration' && <LayerPanel
           layers={layers}
           activeLayerId={activeLayerId}
           onSelect={(id) => { activeLayerIdRef.current = id; setActiveLayerId(id); }}
@@ -2062,6 +2743,27 @@ export function Whiteboard(): React.JSX.Element {
           onRename={(id, name) => updateLayers((current) => current.map((layer) => layer.id === id ? { ...layer, name } : layer))}
           onAdd={addLayer}
           onDelete={deleteLayer}
+        />}
+        {workspaceMode === 'illustration' && <IllustrationToolbox
+          brush={brush}
+          color={color}
+          colorPresets={colorPresets}
+          opacity={strokeOpacity}
+          zoomCompensatedInputWidth={zoomCompensatedInputWidth}
+          width={lineWidth}
+          tool={tool}
+          selectionMode={selectionMode}
+          onBrushChange={(nextBrush) => { if (toolRef.current === 'select') { const ids = new Set(selectedEditablesRef.current.filter((item) => item.kind === 'stroke').map((item) => item.id)); strokesRef.current = strokesRef.current.map((stroke) => ids.has(stroke.id) ? { ...stroke, brush: nextBrush } : stroke); window.dispatchEvent(new CustomEvent('michikusa-redraw')); } brushRef.current = nextBrush; setBrush(nextBrush); markDirty(); }}
+          onColorChange={(nextColor) => { if (toolRef.current === 'select') { const ids = new Set(selectedEditablesRef.current.filter((item) => item.kind === 'stroke').map((item) => item.id)); strokesRef.current = strokesRef.current.map((stroke) => ids.has(stroke.id) ? { ...stroke, color: nextColor } : stroke); window.dispatchEvent(new CustomEvent('michikusa-redraw')); } colorRef.current = nextColor; setColor(nextColor); markDirty(); }}
+          onOpacityChange={(nextOpacity) => { if (toolRef.current === 'select') { const ids = new Set(selectedEditablesRef.current.filter((item) => item.kind === 'stroke').map((item) => item.id)); strokesRef.current = strokesRef.current.map((stroke) => ids.has(stroke.id) ? { ...stroke, opacity: nextOpacity } : stroke); window.dispatchEvent(new CustomEvent('michikusa-redraw')); } opacityRef.current = nextOpacity; setStrokeOpacity(nextOpacity); markDirty(); }}
+          onWidthChange={(nextWidth) => { if (toolRef.current === 'select') { const ids = new Set(selectedEditablesRef.current.filter((item) => item.kind === 'stroke').map((item) => item.id)); const storedWidth = nextWidth * (zoomCompensatedInputWidthRef.current ? 1 / cameraRef.current.zoom : 1); strokesRef.current = strokesRef.current.map((stroke) => ids.has(stroke.id) ? { ...stroke, baseWidth: storedWidth } : stroke); window.dispatchEvent(new CustomEvent('michikusa-redraw')); } widthRef.current = nextWidth; setLineWidth(nextWidth); markDirty(); }}
+          onToolChange={setTool}
+          onSelectionModeChange={(mode) => { selectionModeRef.current = mode; setSelectionMode(mode); }}
+          onRegisterColor={() => void window.michikusa.addMenuPreset({ type: 'color', value: colorRef.current }).then(refreshMenuPresets)}
+          onStartEyedropper={() => startEyedropper({ kind: 'pen' })}
+          onZoomCompensatedInputWidthChange={(enabled) => {
+            changeZoomCompensatedInputWidth(enabled);
+          }}
         />}
         {workspaceMode === 'review' && (showReviewSummary || showWrapSummary) && <aside className="review-summary-panel" style={{ height: `min(${showWrapSummary ? 560 : reviewSummaryHeight}px, calc(100% - 32px))`, transform: `translate(-50%, -50%) translate(${reviewSummaryPosition.x}px, ${reviewSummaryPosition.y}px)` }}>
           <div className="summary-header" onPointerDown={(event) => {
@@ -2103,10 +2805,21 @@ export function Whiteboard(): React.JSX.Element {
         />}
         <canvas
           ref={canvasRef}
-          className={`whiteboard-canvas ${workspaceMode === 'review' ? 'stamp' : tool}${isPanning ? ' panning' : ''}`}
+          className={`whiteboard-canvas ${workspaceMode === 'review' ? 'stamp' : tool}${isSpaceDown ? ' space-pan' : ''}${isPanning ? ' panning' : ''}${isEyedropping ? ' eyedropper' : ''}`}
         />
+        {showImageExport && canvasRef.current && <ExportCropOverlay
+          canvasWidth={canvasRef.current.clientWidth}
+          canvasHeight={canvasRef.current.clientHeight}
+          onCancel={() => setShowImageExport(false)}
+          onExport={(crop) => void exportCanvasCrop(crop)}
+          onPanCanvas={(dx, dy) => {
+            cameraRef.current.x += dx;
+            cameraRef.current.y += dy;
+            window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+          }}
+        />}
         <div className="status">
-          {tool === 'pen' ? 'ペン' : '消しゴム'} · Zoom {zoomLabel}
+          {tool === 'pen' ? 'ペン' : tool === 'eraser' ? '消しゴム' : '選択'} · Zoom {zoomLabel}
           <br />
           {statusMessage}
         </div>

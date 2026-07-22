@@ -15,6 +15,7 @@ declare global {
         saveAs?: boolean,
       ) => Promise<SaveProjectResult>;
       openProject: () => Promise<OpenProjectResult>;
+      openImage: () => Promise<{ canceled: true } | { canceled: false; name: string; dataUrl: string }>;
       onMenuCommand: (
         callback: (command: MenuCommand) => void,
       ) => () => void;
