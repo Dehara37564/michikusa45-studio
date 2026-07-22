@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('michikusa', {
     ipcRenderer.invoke('project:save', project, currentPath, saveAs),
   openProject: (): Promise<OpenProjectResult> =>
     ipcRenderer.invoke('project:open'),
+  openImage: (): Promise<{ canceled: true } | { canceled: false; name: string; dataUrl: string }> =>
+    ipcRenderer.invoke('image:open'),
   onMenuCommand: (callback: (command: MenuCommand) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, command: MenuCommand) => {
       callback(command);

@@ -10,6 +10,7 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 .vscode/
+.vs/
 .idea/
 *.m45
 *.webm
