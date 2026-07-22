@@ -10,9 +10,10 @@ export type RecordingResult = {
   durationMilliseconds: number;
 };
 
-export type RecordingQuality = '720p' | '1080p' | '1440p';
+export type RecordingQuality = '720p' | '1080p' | '1440p' | '4k';
 
 export type RecordingSettings = {
+  microphoneEnabled: boolean;
   audioDeviceId: string;
   quality: RecordingQuality;
   videoBitsPerSecond: 4_000_000 | 8_000_000 | 12_000_000 | 20_000_000;
@@ -24,19 +25,19 @@ type RecordingCallbacks = {
   onElapsedChange: (elapsedMilliseconds: number) => void;
   onAudioLevelChange: (level: number) => void;
 };
+type RecordingFrameRenderer = (context: CanvasRenderingContext2D, width: number, height: number) => void;
 
 const QUALITY_DIMENSIONS: Record<RecordingQuality, [number, number]> = {
   '720p': [1280, 720],
   '1080p': [1920, 1080],
   '1440p': [2560, 1440],
+  '4k': [3840, 2160],
 };
 
-const chooseMimeType = (): string => {
-  const candidates = [
-    'video/webm;codecs=vp8,opus',
-    'video/webm;codecs=vp9,opus',
-    'video/webm',
-  ];
+const chooseMimeType = (withAudio: boolean): string => {
+  const candidates = withAudio
+    ? ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm']
+    : ['video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm'];
 
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? '';
 };
@@ -47,6 +48,7 @@ export class RecordingManager {
   private readonly callbacks: RecordingCallbacks;
   private readonly settings: RecordingSettings;
   private readonly outputContext: CanvasRenderingContext2D;
+  private readonly renderFrame?: RecordingFrameRenderer;
 
   private mediaRecorder: MediaRecorder | null = null;
   private microphoneStream: MediaStream | null = null;
@@ -63,10 +65,12 @@ export class RecordingManager {
     sourceCanvas: HTMLCanvasElement,
     callbacks: RecordingCallbacks,
     settings: RecordingSettings,
+    renderFrame?: RecordingFrameRenderer,
   ) {
     this.sourceCanvas = sourceCanvas;
     this.callbacks = callbacks;
     this.settings = settings;
+    this.renderFrame = renderFrame;
     this.outputCanvas = document.createElement('canvas');
     const [width, height] = QUALITY_DIMENSIONS[settings.quality];
     this.outputCanvas.width = width;
@@ -90,37 +94,38 @@ export class RecordingManager {
     this.callbacks.onStateChange('requesting-permission');
 
     try {
-      this.microphoneStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: this.settings.audioDeviceId
-            ? { exact: this.settings.audioDeviceId }
-            : undefined,
-          channelCount: 1,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: 48000,
-        },
-        video: false,
-      });
-
-      this.startAudioMeter(this.microphoneStream);
+      if (this.settings.microphoneEnabled) {
+        this.microphoneStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: this.settings.audioDeviceId
+              ? { exact: this.settings.audioDeviceId }
+              : undefined,
+            channelCount: 1,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+          },
+          video: false,
+        });
+        this.startAudioMeter(this.microphoneStream);
+      }
 
       this.startFramePump();
 
       const videoStream = this.outputCanvas.captureStream(this.settings.fps);
       const combined = new MediaStream([
         ...videoStream.getVideoTracks(),
-        ...this.microphoneStream.getAudioTracks(),
+        ...(this.microphoneStream?.getAudioTracks() ?? []),
       ]);
       this.outputStream = combined;
 
-      const mimeType = chooseMimeType();
+      const mimeType = chooseMimeType(this.settings.microphoneEnabled);
       this.chunks = [];
       this.mediaRecorder = new MediaRecorder(combined, {
         mimeType: mimeType || undefined,
         videoBitsPerSecond: this.settings.videoBitsPerSecond,
-        audioBitsPerSecond: 192_000,
+        audioBitsPerSecond: this.settings.microphoneEnabled ? 192_000 : undefined,
       });
 
       this.mediaRecorder.addEventListener('dataavailable', (event) => {
@@ -187,12 +192,24 @@ export class RecordingManager {
   }
 
   private startFramePump(): void {
-    const draw = (): void => {
+    let lastRenderedAt = Number.NEGATIVE_INFINITY;
+    const frameInterval = 1000 / this.settings.fps;
+    const draw = (timestamp = performance.now()): void => {
       const context = this.outputContext;
       const targetWidth = this.outputCanvas.width;
       const targetHeight = this.outputCanvas.height;
       const sourceWidth = this.sourceCanvas.width;
       const sourceHeight = this.sourceCanvas.height;
+
+      if (this.renderFrame) {
+        if (timestamp - lastRenderedAt >= frameInterval) {
+          this.renderFrame(context, targetWidth, targetHeight);
+          lastRenderedAt = timestamp;
+        }
+        this.updateAudioLevel();
+        this.animationFrameId = requestAnimationFrame(draw);
+        return;
+      }
 
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, targetWidth, targetHeight);

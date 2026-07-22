@@ -265,7 +265,7 @@ ipcMain.handle('menu:add-preset', async (_event, preset: MenuPreset) => {
       menuPresets.colors.push(preset.value);
     }
   } else {
-    if (!Number.isFinite(preset.value) || preset.value < 1 || preset.value > 20) {
+    if (!Number.isFinite(preset.value) || preset.value < 0.1 || preset.value > 48) {
       return;
     }
     if (!menuPresets.widths.includes(preset.value)) {
@@ -424,6 +424,20 @@ ipcMain.handle('image:save-png', async (_event, bytes: Uint8Array, suggestedName
   const filePath = result.filePath.toLowerCase().endsWith('.png') ? result.filePath : `${result.filePath}.png`;
   await fs.writeFile(filePath, Buffer.from(bytes));
   return { canceled: false, filePath };
+});
+
+ipcMain.handle('image:open', async () => {
+  const result = await dialog.showOpenDialog({
+    title: '画像をキャンバスへ取り込む',
+    properties: ['openFile'],
+    filters: [{ name: '画像', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return { canceled: true };
+  const filePath = result.filePaths[0];
+  const extension = path.extname(filePath).toLowerCase();
+  const mime = extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : extension === '.webp' ? 'image/webp' : extension === '.gif' ? 'image/gif' : extension === '.bmp' ? 'image/bmp' : 'image/png';
+  const bytes = await fs.readFile(filePath);
+  return { canceled: false, name: path.basename(filePath), dataUrl: `data:${mime};base64,${bytes.toString('base64')}` };
 });
 
 

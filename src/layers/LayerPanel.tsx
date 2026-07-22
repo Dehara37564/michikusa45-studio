@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { LayerDefinition } from '../shared/project';
 
 type Props = {
@@ -12,10 +12,13 @@ type Props = {
 };
 
 export function LayerPanel(props: Props): React.JSX.Element {
-  const [collapsed, setCollapsed] = useState(false);
+  const savedLayout = useRef((() => { try { return JSON.parse(localStorage.getItem('layer-panel-layout') ?? 'null') as { position?: { x: number; y: number }; collapsed?: boolean } | null; } catch { return null; } })()).current;
+  const [collapsed, setCollapsed] = useState(savedLayout?.collapsed === true);
   const [editingId, setEditingId] = useState<string>();
-  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [position, setPosition] = useState(savedLayout?.position ?? { x: 0, y: 360 });
   const dragRef = useRef<{ pointerX: number; pointerY: number; originX: number; originY: number } | undefined>(undefined);
+
+  useEffect(() => { localStorage.setItem('layer-panel-layout', JSON.stringify({ position, collapsed })); }, [position, collapsed]);
 
   return <aside className={`layer-panel ${collapsed ? 'collapsed' : ''}`} style={{ transform: `translate(${position.x}px, ${position.y}px)` }}>
     <div className="layer-panel-header" onPointerDown={(event) => {
