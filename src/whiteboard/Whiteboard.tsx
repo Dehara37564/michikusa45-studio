@@ -30,6 +30,8 @@ import { IllustrationToolbox } from '../IllustrationToolbox';
 import { ExportCropOverlay, type ExportCropRequest } from '../ExportCropOverlay';
 import { BRUSH_DEFINITIONS, getBrushDefinition, type BrushKind } from '../shared/brushes';
 
+const APP_LOGO_URL = new URL('../../assets/app-icon.png', import.meta.url).href;
+
 const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 8;
 const DEFAULT_WIDTH = 3;
@@ -2449,7 +2451,7 @@ export function Whiteboard(): React.JSX.Element {
       </nav>
       <header className="toolbar">
         <div className="brand">
-          <img className="brand-logo" src="/app-logo.png" alt="" />
+          <img className="brand-logo" src={APP_LOGO_URL} alt="" />
           <strong>道草45 Studio</strong>
           <span className="version">v0.00.1</span>
           <button
