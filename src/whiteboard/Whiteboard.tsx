@@ -245,7 +245,10 @@ const drawStrokePath = (context: CanvasRenderingContext2D, stroke: Stroke, width
     context.restore();
     return;
   }
-  if (stroke.brush !== 'brush') {
+  // Only the marker has a pressure-independent width. Pressure-sensitive
+  // brushes must be rendered per segment so later samples cannot change the
+  // width of portions that were already drawn.
+  if (stroke.brush === 'marker') {
     const averagePressure = points.reduce((sum, point) => sum + point.pressure, 0) / points.length;
     context.lineWidth = widthAt(averagePressure, .5, 0);
     context.beginPath();
