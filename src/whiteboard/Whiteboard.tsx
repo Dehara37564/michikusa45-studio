@@ -17,7 +17,9 @@ import {
   type Tool,
 } from '../shared/project';
 import {
+  AudioLevelMonitor,
   RecordingManager,
+  type AudioFilterSettings,
   type RecordingQuality,
   type RecordingSettings,
   type RecordingState,
@@ -91,6 +93,27 @@ const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
   quality: '1080p',
   videoBitsPerSecond: 12_000_000,
   fps: 30,
+  audioFilters: {
+    monitoringEnabled: false,
+    monitoringGainDb: -12,
+    gainDb: 0,
+    noiseSuppression: true,
+    highPassEnabled: true,
+    highPassFrequency: 80,
+    eqEnabled: false,
+    lowGainDb: 0,
+    midGainDb: 0,
+    highGainDb: 0,
+    compressorEnabled: true,
+    compressorThresholdDb: -18,
+    compressorRatio: 4,
+    compressorAttackMs: 6,
+    compressorReleaseMs: 60,
+    compressorOutputGainDb: 0,
+    limiterEnabled: true,
+    limiterThresholdDb: -3,
+    limiterReleaseMs: 60,
+  },
   showDuration: true,
   showAudioMeter: true,
 };
@@ -98,6 +121,19 @@ const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
 const AUDIO_METER_FLOOR_DBFS = -60;
 const AUDIO_METER_OPTIMAL_MIN_DBFS = -18;
 const AUDIO_METER_HIGH_MIN_DBFS = -6;
+
+const mergeRecordingSettings = (saved: unknown): RecordingUiSettings => {
+  if (!saved || typeof saved !== 'object') return DEFAULT_RECORDING_SETTINGS;
+  const partial = saved as Partial<RecordingUiSettings>;
+  return {
+    ...DEFAULT_RECORDING_SETTINGS,
+    ...partial,
+    audioFilters: {
+      ...DEFAULT_RECORDING_SETTINGS.audioFilters,
+      ...(partial.audioFilters ?? {}),
+    },
+  };
+};
 
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(maximum, Math.max(minimum, value));
@@ -109,6 +145,70 @@ const hexToRgb = (hex: string): { r: number; g: number; b: number } => {
 
 const rgbToHex = (r: number, g: number, b: number): string =>
   `#${[r, g, b].map((value) => Math.round(value).toString(16).padStart(2, '0')).join('')}`;
+
+type AudioFilterControlsProps = {
+  filters: AudioFilterSettings;
+  onChange: (filters: AudioFilterSettings) => void;
+};
+
+function AudioFilterControls({ filters, onChange }: AudioFilterControlsProps): React.JSX.Element {
+  const change = <K extends keyof AudioFilterSettings>(
+    key: K,
+    value: AudioFilterSettings[K],
+  ): void => onChange({ ...filters, [key]: value });
+  const number = (
+    label: string,
+    key: keyof AudioFilterSettings,
+    minimum: number,
+    maximum: number,
+    step: number,
+    unit: string,
+  ): React.JSX.Element => <label className="audio-number-control">
+    <span>{label}</span>
+    <input
+      type="number"
+      min={minimum}
+      max={maximum}
+      step={step}
+      value={filters[key] as number}
+      onChange={(event) => change(key, clamp(Number(event.target.value), minimum, maximum) as never)}
+    />
+    <small>{unit}</small>
+  </label>;
+  return <div className="audio-filter-controls">
+    <fieldset className="audio-monitoring-settings">
+      <legend><label className="settings-check"><input type="checkbox" checked={filters.monitoringEnabled} onChange={(event) => change('monitoringEnabled', event.target.checked)} />音声を聴く</label></legend>
+      {number('モニター音量', 'monitoringGainDb', -60, 0, 0.1, 'dB')}
+      <p className="audio-monitor-warning">「レベルモニター」中または録画中に再生します。ヘッドホン推奨。スピーカーではハウリングする場合があります。</p>
+    </fieldset>
+    {number('ゲイン', 'gainDb', -30, 30, 0.1, 'dB')}
+    <label className="settings-check"><input type="checkbox" checked={filters.noiseSuppression} onChange={(event) => change('noiseSuppression', event.target.checked)} />ノイズ抑制（OS/ブラウザ）</label>
+    <fieldset>
+      <legend><label className="settings-check"><input type="checkbox" checked={filters.highPassEnabled} onChange={(event) => change('highPassEnabled', event.target.checked)} />ハイパスフィルター</label></legend>
+      {number('カットオフ', 'highPassFrequency', 20, 300, 1, 'Hz')}
+    </fieldset>
+    <fieldset>
+      <legend><label className="settings-check"><input type="checkbox" checked={filters.eqEnabled} onChange={(event) => change('eqEnabled', event.target.checked)} />3バンドEQ</label></legend>
+      {number('低域 120Hz', 'lowGainDb', -20, 20, 0.1, 'dB')}
+      {number('中域 1.5kHz', 'midGainDb', -20, 20, 0.1, 'dB')}
+      {number('高域 6kHz', 'highGainDb', -20, 20, 0.1, 'dB')}
+    </fieldset>
+    <fieldset>
+      <legend><label className="settings-check"><input type="checkbox" checked={filters.compressorEnabled} onChange={(event) => change('compressorEnabled', event.target.checked)} />コンプレッサー</label></legend>
+      {number('しきい値', 'compressorThresholdDb', -60, 0, 0.1, 'dB')}
+      {number('比率', 'compressorRatio', 1, 32, 0.1, ':1')}
+      {number('アタック', 'compressorAttackMs', 0, 1000, 1, 'ms')}
+      {number('リリース', 'compressorReleaseMs', 10, 2000, 1, 'ms')}
+      {number('出力ゲイン', 'compressorOutputGainDb', -30, 30, 0.1, 'dB')}
+    </fieldset>
+    <fieldset>
+      <legend><label className="settings-check"><input type="checkbox" checked={filters.limiterEnabled} onChange={(event) => change('limiterEnabled', event.target.checked)} />リミッター</label></legend>
+      {number('しきい値', 'limiterThresholdDb', -20, 0, 0.1, 'dB')}
+      {number('リリース', 'limiterReleaseMs', 10, 1000, 1, 'ms')}
+    </fieldset>
+    <p className="audio-filter-note">OBSの同名項目は同じ単位で転記できます。RNNoise方式のノイズ抑制と完全一致はしません。</p>
+  </div>;
+}
 
 const rgbToHsv = (r: number, g: number, b: number): { h: number; s: number; v: number } => {
   const red = r / 255;
@@ -398,7 +498,7 @@ export function Whiteboard(): React.JSX.Element {
       try {
         const saved = localStorage.getItem('recording-settings');
         return saved
-          ? { ...DEFAULT_RECORDING_SETTINGS, ...JSON.parse(saved) }
+          ? mergeRecordingSettings(JSON.parse(saved))
           : DEFAULT_RECORDING_SETTINGS;
       } catch {
         return DEFAULT_RECORDING_SETTINGS;
@@ -406,6 +506,9 @@ export function Whiteboard(): React.JSX.Element {
     });
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [audioLevelDbfs, setAudioLevelDbfs] = useState(AUDIO_METER_FLOOR_DBFS);
+  const [audioPeakDbfs, setAudioPeakDbfs] = useState(AUDIO_METER_FLOOR_DBFS);
+  const [audioMonitorActive, setAudioMonitorActive] = useState(false);
+  const audioMonitorRef = useRef<AudioLevelMonitor | null>(null);
   const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [showReviewSummary, setShowReviewSummary] = useState(false);
   const [showWrapSummary, setShowWrapSummary] = useState(false);
@@ -456,6 +559,45 @@ export function Whiteboard(): React.JSX.Element {
     const devices = await navigator.mediaDevices.enumerateDevices();
     setAudioDevices(devices.filter((device) => device.kind === 'audioinput'));
   };
+
+  const stopAudioMonitor = (): void => {
+    audioMonitorRef.current?.stop();
+    audioMonitorRef.current = null;
+    setAudioMonitorActive(false);
+    setAudioLevelDbfs(AUDIO_METER_FLOOR_DBFS);
+    setAudioPeakDbfs(AUDIO_METER_FLOOR_DBFS);
+  };
+
+  const toggleAudioMonitor = async (): Promise<void> => {
+    if (audioMonitorActive) {
+      stopAudioMonitor();
+      return;
+    }
+    try {
+      const monitor = new AudioLevelMonitor();
+      audioMonitorRef.current = monitor;
+      await monitor.start(
+        recordingSettings.audioDeviceId,
+        recordingSettings.audioFilters,
+        (rmsDbfs, peakDbfs) => {
+          setAudioLevelDbfs(rmsDbfs);
+          setAudioPeakDbfs(peakDbfs);
+        },
+      );
+      setAudioMonitorActive(true);
+      await refreshAudioDevices();
+    } catch (error) {
+      stopAudioMonitor();
+      const message = error instanceof Error ? error.message : String(error);
+      window.alert(`音声モニターを開始できませんでした。\n\n${message}`);
+    }
+  };
+
+  useEffect(() => {
+    audioMonitorRef.current?.updateFilters(recordingSettings.audioFilters);
+  }, [recordingSettings.audioFilters]);
+
+  useEffect(() => () => audioMonitorRef.current?.stop(), []);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1024,12 +1166,16 @@ export function Whiteboard(): React.JSX.Element {
     if (!canvas || recordingState !== 'idle') return;
 
     try {
+      stopAudioMonitor();
       setShowRecordingSettings(false);
       lastRenderedRecordingVersionRef.current = -1;
       const manager = new RecordingManager(canvas, {
         onStateChange: setRecordingState,
         onElapsedChange: setRecordingElapsed,
-        onAudioLevelChange: setAudioLevelDbfs,
+        onAudioLevelChange: (rmsDbfs, peakDbfs) => {
+          setAudioLevelDbfs(rmsDbfs);
+          setAudioPeakDbfs(peakDbfs);
+        },
       }, recordingSettings, renderRecordingFrame);
 
       recordingManagerRef.current = manager;
@@ -2704,8 +2850,14 @@ export function Whiteboard(): React.JSX.Element {
             const title = recordingSettings.microphoneEnabled
               ? `入力音量 ${audioLevelDbfs.toFixed(1)} dBFS（${rangeLabel}）`
               : 'マイクはオフです';
-            return <div className={`audio-meter audio-meter-${range}`} title={title} aria-label={title}>
+            const peakRatio = clamp(
+              (audioPeakDbfs - AUDIO_METER_FLOOR_DBFS) / -AUDIO_METER_FLOOR_DBFS,
+              0,
+              1,
+            );
+            return <div className={`audio-meter audio-meter-${range}`} title={`${title} / Peak ${audioPeakDbfs.toFixed(1)} dBFS`} aria-label={title}>
               <span style={{ width: `${Math.round(levelRatio * 100)}%` }} />
+              <i style={{ left: `${Math.round(peakRatio * 100)}%` }} />
             </div>;
           })()}
           <button
@@ -2726,6 +2878,29 @@ export function Whiteboard(): React.JSX.Element {
                 {audioDevices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `マイク ${index + 1}`}</option>)}
               </select>
             </label>
+            <section className="audio-filter-panel">
+              <div className="audio-filter-heading">
+                <strong>音声ミキサー</strong>
+                <button type="button" onClick={() => void toggleAudioMonitor()} disabled={!recordingSettings.microphoneEnabled}>
+                  {audioMonitorActive ? 'モニター停止' : 'レベルモニター'}
+                </button>
+              </div>
+              <div className="audio-monitor-readout">
+                <div className="audio-monitor-axis-title">レベル（dBFS）</div>
+                <div className="audio-monitor-scale"><span style={{ left: '0%' }}>-60</span><span style={{ left: '50%' }}>-30</span><span style={{ left: '70%' }}>-18</span><span style={{ left: '80%' }}>-12</span><span style={{ left: '90%' }}>-6</span><span style={{ left: '100%' }}>0</span></div>
+                <div className="audio-monitor-track">
+                  <span style={{ clipPath: `inset(0 ${100 - clamp((audioLevelDbfs + 60) / 60, 0, 1) * 100}% 0 0)` }} />
+                  {[0, 50, 70, 80, 90, 100].map((position) => <u key={position} style={{ left: `${position}%` }} />)}
+                  <i style={{ left: `${clamp((audioPeakDbfs + 60) / 60, 0, 1) * 100}%` }} />
+                </div>
+                <div className="audio-monitor-zones"><span>小さい</span><span>適正</span><span>大きい</span></div>
+                <output>{audioLevelDbfs.toFixed(1)} dBFS　Peak {audioPeakDbfs.toFixed(1)} dBFS</output>
+              </div>
+              <AudioFilterControls
+                filters={recordingSettings.audioFilters}
+                onChange={(audioFilters) => setRecordingSettings((settings) => ({ ...settings, audioFilters }))}
+              />
+            </section>
             <label>
               <span>画質</span>
               <select value={recordingSettings.quality} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, quality: event.target.value as RecordingQuality }))}>
