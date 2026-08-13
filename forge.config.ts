@@ -10,6 +10,7 @@ const config: ForgeConfig = {
     icon: 'assets/app-icon',
     extraResource: [
       'assets/app-icon.png',
+      'assets/ffmpeg',
       'LICENSE',
       'THIRD_PARTY_NOTICES.md',
       'PRIVACY.md',

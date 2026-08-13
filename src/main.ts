@@ -9,6 +9,8 @@ import {
   type MenuItemConstructorOptions,
 } from 'electron';
 import path from 'node:path';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import type {
   OpenProjectResult,
@@ -26,6 +28,90 @@ declare const MAIN_WINDOW_VITE_NAME: string;
 const PROJECT_FILTER = {
   name: '道草45 Project',
   extensions: ['m45'],
+};
+
+const getFfmpegPath = (): string =>
+  app.isPackaged
+    ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe')
+    : path.join(process.cwd(), 'assets', 'ffmpeg', 'ffmpeg.exe');
+
+const convertWebmToAvi = async (
+  inputPath: string,
+  outputPath: string,
+  fps: 30 | 60,
+  withAudio: boolean,
+  durationMilliseconds: number,
+): Promise<void> => {
+  const ffmpegPath = getFfmpegPath();
+  await fs.access(ffmpegPath);
+
+  await new Promise<void>((resolve, reject) => {
+    const inputArguments = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      inputPath,
+      '-map',
+      '0:v:0',
+      '-vf',
+      withAudio
+        ? `fps=${fps},tpad=stop_mode=clone:stop_duration=86400`
+        : `fps=${fps}`,
+      '-fps_mode',
+      'cfr',
+      '-c:v',
+      'mjpeg',
+      '-q:v',
+      '3',
+      '-pix_fmt',
+      'yuvj420p',
+    ];
+    const audioArguments = withAudio
+      ? [
+          '-map',
+          '0:a:0',
+          '-c:a',
+          'pcm_s16le',
+          '-ar',
+          '48000',
+          '-ac',
+          '2',
+        ]
+      : [];
+    const durationSeconds = Math.max(
+      0.001,
+      durationMilliseconds / 1000,
+    ).toFixed(3);
+    const process = spawn(ffmpegPath, [
+      ...inputArguments,
+      ...audioArguments,
+      '-t',
+      durationSeconds,
+      outputPath,
+    ], { windowsHide: true });
+
+    let stderr = '';
+    process.stderr.setEncoding('utf8');
+    process.stderr.on('data', (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-16_384);
+    });
+    process.once('error', reject);
+    process.once('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `AVI conversion failed (exit code ${code ?? 'unknown'}).${
+            stderr ? `\n${stderr.trim()}` : ''
+          }`,
+        ),
+      );
+    });
+  });
 };
 
 type MenuPresets = {
@@ -447,14 +533,17 @@ ipcMain.handle(
     _event,
     bytes: Uint8Array,
     suggestedName: string,
+    fps: 30 | 60,
+    withAudio: boolean,
+    durationMilliseconds: number,
   ): Promise<SaveRecordingResult> => {
     const result = await dialog.showSaveDialog({
       title: '録画を保存',
       defaultPath: suggestedName,
       filters: [
         {
-          name: 'WebM video',
-          extensions: ['webm'],
+          name: 'AVI video',
+          extensions: ['avi'],
         },
       ],
     });
@@ -463,11 +552,32 @@ ipcMain.handle(
       return { canceled: true };
     }
 
-    const filePath = result.filePath.toLowerCase().endsWith('.webm')
+    const filePath = result.filePath.toLowerCase().endsWith('.avi')
       ? result.filePath
-      : `${result.filePath}.webm`;
-    await fs.writeFile(filePath, Buffer.from(bytes));
-    return { canceled: false, filePath };
+      : `${result.filePath}.avi`;
+    const frameRate: 30 | 60 = fps === 60 ? 60 : 30;
+    const temporaryDirectory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'michikusa45-'),
+    );
+    const inputPath = path.join(temporaryDirectory, 'recording.webm');
+    const convertedPath = path.join(temporaryDirectory, 'recording.avi');
+
+    try {
+      await fs.writeFile(inputPath, Buffer.from(bytes));
+      await convertWebmToAvi(
+        inputPath,
+        convertedPath,
+        frameRate,
+        withAudio === true,
+        Number.isFinite(durationMilliseconds) ? durationMilliseconds : 1,
+      );
+      await fs.copyFile(convertedPath, filePath);
+      return { canceled: false, filePath };
+    } finally {
+      await fs.rm(temporaryDirectory, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
   },
 );
 

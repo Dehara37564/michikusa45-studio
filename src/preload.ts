@@ -37,8 +37,18 @@ contextBridge.exposeInMainWorld('michikusa', {
   saveRecording: (
     bytes: Uint8Array,
     suggestedName: string,
+    fps: 30 | 60,
+    withAudio: boolean,
+    durationMilliseconds: number,
   ): Promise<SaveRecordingResult> =>
-    ipcRenderer.invoke('recording:save', bytes, suggestedName),
+    ipcRenderer.invoke(
+      'recording:save',
+      bytes,
+      suggestedName,
+      fps,
+      withAudio,
+      durationMilliseconds,
+    ),
   savePng: (bytes: Uint8Array, suggestedName: string): Promise<{ canceled: boolean; filePath?: string }> =>
     ipcRenderer.invoke('image:save-png', bytes, suggestedName),
 });

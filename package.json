@@ -7,9 +7,13 @@
   "license": "UNLICENSED",
   "main": ".vite/build/main.js",
   "scripts": {
+    "prepare:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-ffmpeg.ps1",
+    "prestart": "npm run prepare:ffmpeg",
     "start": "electron-forge start",
     "test": "node --experimental-strip-types --test src/review/analysis.test.ts",
+    "prepackage": "npm run prepare:ffmpeg",
     "package": "electron-forge package",
+    "premake": "npm run prepare:ffmpeg",
     "make": "electron-forge make"
   },
   "devDependencies": {

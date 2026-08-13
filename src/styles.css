@@ -722,9 +722,12 @@ button:disabled {
 .audio-meter span {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, #34a853 0 70%, #fbbc04 85%, #ea4335 100%);
+  background: #34a853;
   transition: width 80ms linear;
 }
+
+.audio-meter-optimal span { background: #fbbc04; }
+.audio-meter-high span { background: #ea4335; }
 
 .recording-settings-panel {
   position: fixed;
@@ -832,4 +835,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .summary-header button:hover:not(:disabled) { background: transparent; color: transparent; }
 .recording-settings-panel { border-color: var(--color-border); background: #ffffff; box-shadow: var(--shadow-panel); }
 .audio-meter { border-color: var(--color-border); background: #ffffff; }
-.audio-meter span { background: linear-gradient(90deg, var(--color-brand-green), #8B6A45, var(--color-recording)); }
+.audio-meter span { background: #34a853; }
+.audio-meter-optimal span { background: #fbbc04; }
+.audio-meter-high span { background: #ea4335; }

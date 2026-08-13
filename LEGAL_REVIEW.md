@@ -6,7 +6,7 @@
 
 ## 結論
 
-FFmpegとH.264/MP4変換はVersion 1から削除され、GPLv3版FFmpegの同梱に関する問題は解消しました。一般公開前には、プロジェクト自身のライセンス、ts-ebmlのMIT表示、ロゴの制作来歴と図形商標を引き続き確認する必要があります。
+GPLv3版FFmpegとH.264/MP4変換は使用しません。AviUtl向けAVI変換のため、BtbNのLGPL構成FFmpegを独立実行ファイルとして同梱します。一般公開前にはLGPL表示とソース入手案内、プロジェクト自身のライセンス、ロゴの制作来歴と図形商標を引き続き確認する必要があります。
 
 製品名「道草45 Studio」について、同一・類似名称の明白な衝突は今回の文字検索では見つかりませんでした。ただし、ロゴの図形商標検索、区分を限定した専門的な類否判断、国外調査は未完了です。
 
@@ -20,9 +20,9 @@ FFmpegとH.264/MP4変換はVersion 1から削除され、GPLv3版FFmpegの同梱
 
 ## 2. 録画形式
 
-Version 1はElectronのMediaRecorderでVP8またはVP9映像とOpus音声を収録し、WebMとして保存します。FFmpeg、libx264、H.264、AAC、MP4変換は使用せず、配布物にもFFmpeg実行ファイルを含めません。
+ElectronのMediaRecorderでVP8またはVP9映像とOpus音声を内部WebMへ収録し、録画終了後にLGPL構成FFmpegで固定フレームレートAVIへ変換します。AVIはMotion JPEG映像と48kHz PCM音声を使用します。libx264、H.264、AAC、MP4変換は使用しません。
 
-WebM、VP8/VP9、Opusについても、配布地域や商用利用形態に応じた最終的な法務確認を妨げるものではありませんが、以前のGPLv3版FFmpeg同梱に伴うソース提供義務は対象外になりました。
+同梱するBtbNビルドは`lgpl-shared` variantへ固定し、SHA-256を検証します。配布物には当該ビルドの`LICENSE.txt`を含め、`THIRD_PARTY_NOTICES.md`からFFmpeg本体とビルドスクリプトのソースを案内します。GPL専用機能を有効にしたビルドへ差し替えた場合は条件が変わるため、リリースごとに`ffmpeg -buildconf`と最終成果物を再監査してください。
 
 ## 3. EBML.min.js
 
@@ -82,6 +82,7 @@ J-PlatPatで次を検索しました。
 - [ ] ロゴの制作者・権利者・制作過程を記録
 - [ ] ts-ebmlのMIT表示を同梱
 - [ ] 製品へ実際に同梱されるnpm依存のライセンス一覧を生成
+- [ ] 同梱FFmpegがLGPL variantであること、ライセンス本文とソース案内を確認
 - [ ] 第9・41・42類を中心に名称商標を専門調査
 - [ ] ロゴの図形商標・類似画像を調査
 

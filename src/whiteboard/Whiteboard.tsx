@@ -89,11 +89,15 @@ const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
   microphoneEnabled: true,
   audioDeviceId: '',
   quality: '1080p',
-  videoBitsPerSecond: 8_000_000,
+  videoBitsPerSecond: 12_000_000,
   fps: 30,
   showDuration: true,
   showAudioMeter: true,
 };
+
+const AUDIO_METER_FLOOR_DBFS = -60;
+const AUDIO_METER_OPTIMAL_MIN_DBFS = -18;
+const AUDIO_METER_HIGH_MIN_DBFS = -6;
 
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(maximum, Math.max(minimum, value));
@@ -401,7 +405,7 @@ export function Whiteboard(): React.JSX.Element {
       }
     });
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
-  const [audioLevel, setAudioLevel] = useState(0);
+  const [audioLevelDbfs, setAudioLevelDbfs] = useState(AUDIO_METER_FLOOR_DBFS);
   const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [showReviewSummary, setShowReviewSummary] = useState(false);
   const [showWrapSummary, setShowWrapSummary] = useState(false);
@@ -1025,7 +1029,7 @@ export function Whiteboard(): React.JSX.Element {
       const manager = new RecordingManager(canvas, {
         onStateChange: setRecordingState,
         onElapsedChange: setRecordingElapsed,
-        onAudioLevelChange: setAudioLevel,
+        onAudioLevelChange: setAudioLevelDbfs,
       }, recordingSettings, renderRecordingFrame);
 
       recordingManagerRef.current = manager;
@@ -1074,7 +1078,10 @@ export function Whiteboard(): React.JSX.Element {
 
       const saveResult = await window.michikusa.saveRecording(
         bytes,
-        `道草45-${stamp}.webm`,
+        `道草45-${stamp}.avi`,
+        recordingSettings.fps,
+        recordingSettings.microphoneEnabled,
+        recordingResult.durationMilliseconds,
       );
 
       if (saveResult.canceled) {
@@ -2682,9 +2689,25 @@ export function Whiteboard(): React.JSX.Element {
           >
             {recordingSettings.microphoneEnabled ? '🎙' : '🔇'}
           </button>
-          {recordingSettings.showAudioMeter && <div className="audio-meter" title={recordingSettings.microphoneEnabled ? '入力音量' : 'マイクはオフです'}>
-            <span style={{ width: `${Math.round(audioLevel * 100)}%` }} />
-          </div>}
+          {recordingSettings.showAudioMeter && (() => {
+            const levelRatio = clamp(
+              (audioLevelDbfs - AUDIO_METER_FLOOR_DBFS) / -AUDIO_METER_FLOOR_DBFS,
+              0,
+              1,
+            );
+            const range = audioLevelDbfs >= AUDIO_METER_HIGH_MIN_DBFS
+              ? 'high'
+              : audioLevelDbfs >= AUDIO_METER_OPTIMAL_MIN_DBFS
+                ? 'optimal'
+                : 'low';
+            const rangeLabel = range === 'high' ? '大きすぎます' : range === 'optimal' ? '適正です' : '小さいです';
+            const title = recordingSettings.microphoneEnabled
+              ? `入力音量 ${audioLevelDbfs.toFixed(1)} dBFS（${rangeLabel}）`
+              : 'マイクはオフです';
+            return <div className={`audio-meter audio-meter-${range}`} title={title} aria-label={title}>
+              <span style={{ width: `${Math.round(levelRatio * 100)}%` }} />
+            </div>;
+          })()}
           <button
             type="button"
             className={showRecordingSettings ? 'active' : ''}
@@ -2719,6 +2742,9 @@ export function Whiteboard(): React.JSX.Element {
                 <option value={8_000_000}>8 Mbps</option>
                 <option value={12_000_000}>12 Mbps</option>
                 <option value={20_000_000}>20 Mbps</option>
+                <option value={24_000_000}>24 Mbps</option>
+                <option value={45_000_000}>45 Mbps</option>
+                <option value={68_000_000}>68 Mbps</option>
               </select>
             </label>
             <label>

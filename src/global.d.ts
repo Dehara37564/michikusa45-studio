@@ -27,6 +27,9 @@ declare global {
       saveRecording: (
         bytes: Uint8Array,
         suggestedName: string,
+        fps: 30 | 60,
+        withAudio: boolean,
+        durationMilliseconds: number,
       ) => Promise<SaveRecordingResult>;
       savePng: (
         bytes: Uint8Array,

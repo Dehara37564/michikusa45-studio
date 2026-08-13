@@ -42,14 +42,35 @@ Electron and Chromium components are included in packaged distributions.
 Electron's `LICENSE` and Chromium's `LICENSES.chromium.html`, generated with the
 Electron distribution, form part of these notices and must not be removed.
 
-The `ffmpeg.dll` supplied by Electron is an Electron/Chromium media component.
-It is not the separately distributed FFmpeg command-line executable previously
-used by this project.
+The `ffmpeg.dll` supplied by Electron is an Electron/Chromium media component
+and is separate from the command-line FFmpeg distribution described below.
 
 Sources:
 
 - https://github.com/electron/electron
 - https://www.chromium.org/audio-video/
+
+## FFmpeg (LGPL build)
+
+The Windows distribution bundles an unmodified LGPL-variant shared build of
+FFmpeg from BtbN/FFmpeg-Builds. It is invoked as a separate command-line process
+to convert the internal WebM recording to a constant-frame-rate AVI containing
+Motion JPEG video and PCM audio. GPL-only components such as libx264 are not
+included or used.
+
+Build: `ffmpeg-N-125365-g9a01c1cb6a-win64-lgpl-shared.zip`
+
+Release: `autobuild-2026-06-30-13-34`
+
+Sources and build scripts:
+
+- https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-06-30-13-34
+- https://github.com/FFmpeg/FFmpeg
+
+FFmpeg is primarily licensed under the GNU Lesser General Public License
+version 2.1 or later. The exact license supplied with the binary distribution
+is packaged as `resources/ffmpeg/LICENSE.txt`. Recipients may replace the
+separately distributed executable and DLL files with a compatible build.
 
 ## React and React DOM
 

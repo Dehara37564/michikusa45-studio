@@ -16,14 +16,21 @@ export type RecordingSettings = {
   microphoneEnabled: boolean;
   audioDeviceId: string;
   quality: RecordingQuality;
-  videoBitsPerSecond: 4_000_000 | 8_000_000 | 12_000_000 | 20_000_000;
+  videoBitsPerSecond:
+    | 4_000_000
+    | 8_000_000
+    | 12_000_000
+    | 20_000_000
+    | 24_000_000
+    | 45_000_000
+    | 68_000_000;
   fps: 30 | 60;
 };
 
 type RecordingCallbacks = {
   onStateChange: (state: RecordingState) => void;
   onElapsedChange: (elapsedMilliseconds: number) => void;
-  onAudioLevelChange: (level: number) => void;
+  onAudioLevelChange: (decibelsFullScale: number) => void;
 };
 type RecordingFrameRenderer = (context: CanvasRenderingContext2D, width: number, height: number) => void;
 
@@ -34,10 +41,12 @@ const QUALITY_DIMENSIONS: Record<RecordingQuality, [number, number]> = {
   '4k': [3840, 2160],
 };
 
+const AUDIO_METER_FLOOR_DBFS = -60;
+
 const chooseMimeType = (withAudio: boolean): string => {
   const candidates = withAudio
-    ? ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm']
-    : ['video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm'];
+    ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
 
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? '';
 };
@@ -86,6 +95,8 @@ export class RecordingManager {
     }
 
     this.outputContext = context;
+    this.outputContext.imageSmoothingEnabled = true;
+    this.outputContext.imageSmoothingQuality = 'high';
   }
 
   public async start(): Promise<void> {
@@ -192,7 +203,7 @@ export class RecordingManager {
   }
 
   private startFramePump(): void {
-    let lastRenderedAt = Number.NEGATIVE_INFINITY;
+    let nextFrameAt: number | null = null;
     const frameInterval = 1000 / this.settings.fps;
     const draw = (timestamp = performance.now()): void => {
       const context = this.outputContext;
@@ -202,9 +213,16 @@ export class RecordingManager {
       const sourceHeight = this.sourceCanvas.height;
 
       if (this.renderFrame) {
-        if (timestamp - lastRenderedAt >= frameInterval) {
+        if (nextFrameAt === null || timestamp >= nextFrameAt) {
           this.renderFrame(context, targetWidth, targetHeight);
-          lastRenderedAt = timestamp;
+          if (nextFrameAt === null) {
+            nextFrameAt = timestamp + frameInterval;
+          } else {
+            const skippedIntervals = Math.floor(
+              (timestamp - nextFrameAt) / frameInterval,
+            );
+            nextFrameAt += (skippedIntervals + 1) * frameInterval;
+          }
         }
         this.updateAudioLevel();
         this.animationFrameId = requestAnimationFrame(draw);
@@ -260,7 +278,10 @@ export class RecordingManager {
       sumSquares += normalized * normalized;
     }
     const rms = Math.sqrt(sumSquares / this.audioSamples.length);
-    this.callbacks.onAudioLevelChange(Math.min(1, rms * 4));
+    const decibelsFullScale = rms > 0
+      ? Math.max(AUDIO_METER_FLOOR_DBFS, Math.min(0, 20 * Math.log10(rms)))
+      : AUDIO_METER_FLOOR_DBFS;
+    this.callbacks.onAudioLevelChange(decibelsFullScale);
   }
 
   private cleanup(): void {
@@ -286,6 +307,6 @@ export class RecordingManager {
     void this.audioContext?.close();
     this.audioContext = null;
     this.callbacks.onElapsedChange(0);
-    this.callbacks.onAudioLevelChange(0);
+    this.callbacks.onAudioLevelChange(AUDIO_METER_FLOOR_DBFS);
   }
 }

@@ -15,3 +15,5 @@ Thumbs.db
 *.m45
 *.webm
 *.mp4
+*.avi
+/assets/ffmpeg/
