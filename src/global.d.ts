@@ -23,13 +23,25 @@ declare global {
       getMenuPresets: () => Promise<{ colors: string[]; widths: number[] }>;
       removeMenuPreset: (preset: MenuPreset) => Promise<void>;
       setFullScreen: (fullScreen: boolean) => Promise<void>;
+      isFullScreen: () => Promise<boolean>;
       quit: () => Promise<void>;
+      startRecordingConversion: (
+        fps: 30 | 60,
+        withAudio: boolean,
+        outputWidth: number,
+        outputHeight: number,
+      ) => Promise<string>;
+      writeRecordingConversion: (id: string, bytes: Uint8Array) => Promise<void>;
+      finishRecordingConversion: (id: string, suggestedName: string) => Promise<SaveRecordingResult>;
+      abortRecordingConversion: (id: string) => Promise<void>;
       saveRecording: (
         bytes: Uint8Array,
         suggestedName: string,
         fps: 30 | 60,
         withAudio: boolean,
         durationMilliseconds: number,
+        outputWidth: number,
+        outputHeight: number,
       ) => Promise<SaveRecordingResult>;
       savePng: (
         bytes: Uint8Array,

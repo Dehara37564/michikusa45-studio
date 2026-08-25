@@ -18,6 +18,7 @@ import {
 } from '../shared/project';
 import {
   AudioLevelMonitor,
+  getRecordingDimensions,
   RecordingManager,
   type AudioFilterSettings,
   type RecordingQuality,
@@ -62,9 +63,51 @@ const loadZoomCompensatedInputWidth = (): boolean => {
 };
 const MIN_BACKGROUND_SPACING = 8;
 const MAX_BACKGROUND_SPACING = 96;
+const UI_PREFERENCES_STORAGE_KEY = 'whiteboard-ui-preferences';
 const WRAP_NOTE_INSET = 44;
 const WRAP_NOTE_TOP = 414;
 const WRAP_NOTE_BOTTOM = 32;
+
+type WhiteboardUiPreferences = {
+  backgroundColor: CanvasBackgroundColor;
+  backgroundPattern: CanvasBackgroundPattern;
+  backgroundSpacing: number;
+  drawingSettings: Record<DrawingSettingKey, DrawingSetting>;
+};
+
+const loadWhiteboardUiPreferences = (): WhiteboardUiPreferences => {
+  const defaults: WhiteboardUiPreferences = {
+    backgroundColor: DEFAULT_BACKGROUND_COLOR,
+    backgroundPattern: DEFAULT_BACKGROUND_PATTERN,
+    backgroundSpacing: DEFAULT_BACKGROUND_SPACING,
+    drawingSettings: createDefaultDrawingSettings(),
+  };
+  try {
+    const parsed = JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) ?? 'null') as Partial<WhiteboardUiPreferences> | null;
+    if (!parsed) return defaults;
+    const colors: CanvasBackgroundColor[] = ['white', 'black', 'paper'];
+    const patterns: CanvasBackgroundPattern[] = ['plain', 'dots', 'ruled', 'grid'];
+    const savedDrawingSettings = parsed.drawingSettings ?? {} as Partial<Record<DrawingSettingKey, DrawingSetting>>;
+    const drawingSettings = createDefaultDrawingSettings();
+    (Object.keys(drawingSettings) as DrawingSettingKey[]).forEach((key) => {
+      const saved = savedDrawingSettings[key];
+      if (!saved) return;
+      drawingSettings[key] = {
+        width: Number.isFinite(saved.width) ? clamp(saved.width, 0.1, 24) : drawingSettings[key].width,
+        opacity: Number.isFinite(saved.opacity) ? clamp(saved.opacity, 0.05, 1) : drawingSettings[key].opacity,
+        color: typeof saved.color === 'string' && /^#[0-9a-f]{6}$/i.test(saved.color) ? saved.color : drawingSettings[key].color,
+      };
+    });
+    return {
+      backgroundColor: colors.includes(parsed.backgroundColor as CanvasBackgroundColor) ? parsed.backgroundColor as CanvasBackgroundColor : defaults.backgroundColor,
+      backgroundPattern: patterns.includes(parsed.backgroundPattern as CanvasBackgroundPattern) ? parsed.backgroundPattern as CanvasBackgroundPattern : defaults.backgroundPattern,
+      backgroundSpacing: Number.isFinite(parsed.backgroundSpacing) ? clamp(parsed.backgroundSpacing as number, MIN_BACKGROUND_SPACING, MAX_BACKGROUND_SPACING) : defaults.backgroundSpacing,
+      drawingSettings,
+    };
+  } catch {
+    return defaults;
+  }
+};
 
 const createDefaultLayers = (): LayerDefinition[] => [
   { id: DEFAULT_LAYER_ID, name: 'レイヤー1', visible: true, order: 0 },
@@ -247,45 +290,6 @@ const hsvToRgb = (h: number, s: number, v: number): { r: number; g: number; b: n
 const makeId = (): string =>
   `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-const makeSeekableWebm = async (blob: Blob): Promise<Blob> => {
-  const originalBuffer = await blob.arrayBuffer();
-  const ebml = window.EBML;
-  if (!ebml) {
-    throw new Error('WebM処理ライブラリを読み込めませんでした。');
-  }
-
-  const decoder = new ebml.Decoder();
-  const reader = new ebml.Reader();
-
-  reader.logging = false;
-  reader.drop_default_duration = false;
-
-  const elements = decoder.decode(originalBuffer);
-  for (const element of elements) {
-    reader.read(element);
-  }
-  reader.stop();
-
-  if (
-    reader.metadataSize <= 0 ||
-    reader.metadataSize >= originalBuffer.byteLength ||
-    reader.duration <= 0
-  ) {
-    throw new Error('WebMの時間情報を解析できませんでした。');
-  }
-
-  const refinedMetadata = ebml.tools.makeMetadataSeekable(
-    reader.metadatas,
-    reader.duration,
-    reader.cues,
-  );
-  const mediaBody = originalBuffer.slice(reader.metadataSize);
-
-  return new Blob([refinedMetadata, mediaBody], {
-    type: blob.type || 'video/webm',
-  });
-};
-
 const cloneStrokes = (strokes: Stroke[]): Stroke[] =>
   strokes.map((stroke) => ({
     ...stroke,
@@ -418,14 +422,16 @@ const distancePointToSegment = (
 };
 
 export function Whiteboard(): React.JSX.Element {
+  const initialUiPreferencesRef = useRef(loadWhiteboardUiPreferences());
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const directRecordingRef = useRef(false);
   const strokesRef = useRef<Stroke[]>([]);
   const redoRef = useRef<Stroke[]>([]);
   const activeStrokeRef = useRef<Stroke | null>(null);
   const cameraRef = useRef<Camera>({ x: 0, y: 0, zoom: 1 });
-  const backgroundColorRef = useRef<CanvasBackgroundColor>(DEFAULT_BACKGROUND_COLOR);
-  const backgroundPatternRef = useRef<CanvasBackgroundPattern>(DEFAULT_BACKGROUND_PATTERN);
-  const backgroundSpacingRef = useRef(DEFAULT_BACKGROUND_SPACING);
+  const backgroundColorRef = useRef<CanvasBackgroundColor>(initialUiPreferencesRef.current.backgroundColor);
+  const backgroundPatternRef = useRef<CanvasBackgroundPattern>(initialUiPreferencesRef.current.backgroundPattern);
+  const backgroundSpacingRef = useRef(initialUiPreferencesRef.current.backgroundSpacing);
   const isSpaceDownRef = useRef(false);
   const isPanningRef = useRef(false);
   const isErasingRef = useRef(false);
@@ -434,8 +440,9 @@ export function Whiteboard(): React.JSX.Element {
   const isPointerOverCanvasRef = useRef(false);
   const createdAtRef = useRef(new Date().toISOString());
   const recordingManagerRef = useRef<RecordingManager | null>(null);
-  const recordingSceneVersionRef = useRef(0);
-  const lastRenderedRecordingVersionRef = useRef(-1);
+  const recordingConversionIdRef = useRef<string | null>(null);
+  const recordingChunkWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const recordingWasFullScreenRef = useRef(false);
   const recordingStateRef = useRef<RecordingState>('idle');
   const recordingElapsedRef = useRef(0);
   const reviewRef = useRef<ReviewData>(createDefaultReviewData());
@@ -462,27 +469,31 @@ export function Whiteboard(): React.JSX.Element {
   const reviewSummaryDragRef = useRef<{ pointerX: number; pointerY: number; originX: number; originY: number } | undefined>(undefined);
 
   const toolRef = useRef<Tool>('pen');
-  const colorRef = useRef(DEFAULT_COLOR);
-  const widthRef = useRef(DEFAULT_WIDTH);
+  const colorRef = useRef(initialUiPreferencesRef.current.drawingSettings.pen.color);
+  const widthRef = useRef(initialUiPreferencesRef.current.drawingSettings.pen.width);
   const brushRef = useRef<BrushKind>(DEFAULT_BRUSH);
-  const opacityRef = useRef(DEFAULT_OPACITY);
+  const opacityRef = useRef(initialUiPreferencesRef.current.drawingSettings.pen.opacity);
   const zoomCompensatedInputWidthRef = useRef(loadZoomCompensatedInputWidth());
-  const drawingSettingsRef = useRef<Record<DrawingSettingKey, DrawingSetting>>(createDefaultDrawingSettings());
+  const drawingSettingsRef = useRef<Record<DrawingSettingKey, DrawingSetting>>(initialUiPreferencesRef.current.drawingSettings);
   const activeDrawingSettingKeyRef = useRef<DrawingSettingKey>('pen');
   const eyedropperTargetRef = useRef<{ kind: 'pen' } | { kind: 'stamp'; definitionId: string } | undefined>(undefined);
 
   const [tool, setTool] = useState<Tool>('pen');
   const [selectionMode, setSelectionMode] = useState<'transform' | 'marquee'>('transform');
-  const [color, setColor] = useState(DEFAULT_COLOR);
-  const [lineWidth, setLineWidth] = useState(DEFAULT_WIDTH);
+  const [color, setColor] = useState(initialUiPreferencesRef.current.drawingSettings.pen.color);
+  const [lineWidth, setLineWidth] = useState(initialUiPreferencesRef.current.drawingSettings.pen.width);
+  const [isLineWidthEditing, setIsLineWidthEditing] = useState(false);
+  const [lineWidthDraft, setLineWidthDraft] = useState('');
   const [brush, setBrush] = useState<BrushKind>(DEFAULT_BRUSH);
-  const [strokeOpacity, setStrokeOpacity] = useState(DEFAULT_OPACITY);
+  const [strokeOpacity, setStrokeOpacity] = useState(initialUiPreferencesRef.current.drawingSettings.pen.opacity);
   const [zoomCompensatedInputWidth, setZoomCompensatedInputWidth] = useState(() => zoomCompensatedInputWidthRef.current);
   const [isEyedropping, setIsEyedropping] = useState(false);
   const [showImageExport, setShowImageExport] = useState(false);
-  const [backgroundColor, setBackgroundColor] = useState<CanvasBackgroundColor>(DEFAULT_BACKGROUND_COLOR);
-  const [backgroundPattern, setBackgroundPattern] = useState<CanvasBackgroundPattern>(DEFAULT_BACKGROUND_PATTERN);
-  const [backgroundSpacing, setBackgroundSpacing] = useState(DEFAULT_BACKGROUND_SPACING);
+  const [backgroundColor, setBackgroundColor] = useState<CanvasBackgroundColor>(initialUiPreferencesRef.current.backgroundColor);
+  const [backgroundPattern, setBackgroundPattern] = useState<CanvasBackgroundPattern>(initialUiPreferencesRef.current.backgroundPattern);
+  const [backgroundSpacing, setBackgroundSpacing] = useState(initialUiPreferencesRef.current.backgroundSpacing);
+  const [isBackgroundSpacingEditing, setIsBackgroundSpacingEditing] = useState(false);
+  const [backgroundSpacingDraft, setBackgroundSpacingDraft] = useState('');
   const [isSpaceDown, setIsSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [zoomLabel, setZoomLabel] = useState('100%');
@@ -492,6 +503,7 @@ export function Whiteboard(): React.JSX.Element {
   const [statusMessage, setStatusMessage] = useState('準備完了');
   const [recordingState, setRecordingState] =
     useState<RecordingState>('idle');
+  const [recordingViewportActive, setRecordingViewportActive] = useState(false);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   const [recordingSettings, setRecordingSettings] =
     useState<RecordingUiSettings>(() => {
@@ -554,6 +566,28 @@ export function Whiteboard(): React.JSX.Element {
     document.addEventListener('pointerdown', closeColorPickerOutside);
     return () => document.removeEventListener('pointerdown', closeColorPickerOutside);
   }, [openMenu]);
+
+  useEffect(() => {
+    if (!openMenu) return;
+    const closeMenuOutside = (event: PointerEvent): void => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.app-menu, .color-picker-control')) return;
+      setOpenMenu(null);
+    };
+    document.addEventListener('pointerdown', closeMenuOutside);
+    return () => document.removeEventListener('pointerdown', closeMenuOutside);
+  }, [openMenu]);
+
+  useEffect(() => {
+    if (!showRecordingSettings) return;
+    const closeRecordingSettingsOutside = (event: PointerEvent): void => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.recording-settings-panel, .recording-settings-toggle')) return;
+      setShowRecordingSettings(false);
+    };
+    document.addEventListener('pointerdown', closeRecordingSettingsOutside);
+    return () => document.removeEventListener('pointerdown', closeRecordingSettingsOutside);
+  }, [showRecordingSettings]);
 
   const refreshAudioDevices = async (): Promise<void> => {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -623,6 +657,30 @@ export function Whiteboard(): React.JSX.Element {
 
   const markDirty = (): void => {
     setIsDirty(true);
+  };
+
+  const applyLineWidth = (value: number): void => {
+    if (!Number.isFinite(value)) return;
+    const nextWidth = Math.round(clamp(value, 0.1, 24) * 10) / 10;
+    widthRef.current = nextWidth;
+    const settingKey = activeDrawingSettingKeyRef.current;
+    drawingSettingsRef.current[settingKey] = {
+      ...drawingSettingsRef.current[settingKey],
+      width: nextWidth,
+    };
+    setLineWidth(nextWidth);
+    markDirty();
+  };
+
+  const beginLineWidthEditing = (): void => {
+    setLineWidthDraft(lineWidth.toFixed(1));
+    setIsLineWidthEditing(true);
+  };
+
+  const commitLineWidthEditing = (): void => {
+    const parsed = Number(lineWidthDraft.trim().replace(',', '.'));
+    if (Number.isFinite(parsed)) applyLineWidth(parsed);
+    setIsLineWidthEditing(false);
   };
 
   const changeZoomCompensatedInputWidth = (enabled: boolean): void => {
@@ -715,6 +773,20 @@ export function Whiteboard(): React.JSX.Element {
     setStrokeOpacity(next.opacity);
     setColor(next.color);
   }, [tool, brush]);
+
+  useEffect(() => {
+    try {
+      const preferences: WhiteboardUiPreferences = {
+        backgroundColor,
+        backgroundPattern,
+        backgroundSpacing,
+        drawingSettings: drawingSettingsRef.current,
+      };
+      localStorage.setItem(UI_PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
+    } catch {
+      // The app remains usable when browser storage is unavailable.
+    }
+  }, [backgroundColor, backgroundPattern, backgroundSpacing, color, lineWidth, strokeOpacity, tool, brush]);
 
   const buildProject = (): ProjectFile => {
     const now = new Date().toISOString();
@@ -962,11 +1034,23 @@ export function Whiteboard(): React.JSX.Element {
   };
 
   const changeBackgroundSpacing = (nextSpacing: number): void => {
-    const normalizedSpacing = clamp(nextSpacing, MIN_BACKGROUND_SPACING, MAX_BACKGROUND_SPACING);
+    if (!Number.isFinite(nextSpacing)) return;
+    const normalizedSpacing = Math.round(clamp(nextSpacing, MIN_BACKGROUND_SPACING, MAX_BACKGROUND_SPACING));
     backgroundSpacingRef.current = normalizedSpacing;
     setBackgroundSpacing(normalizedSpacing);
     markDirty();
     window.dispatchEvent(new CustomEvent('michikusa-redraw'));
+  };
+
+  const beginBackgroundSpacingEditing = (): void => {
+    setBackgroundSpacingDraft(String(backgroundSpacing));
+    setIsBackgroundSpacingEditing(true);
+  };
+
+  const commitBackgroundSpacingEditing = (): void => {
+    const parsed = Number(backgroundSpacingDraft.trim().replace(',', '.'));
+    if (Number.isFinite(parsed)) changeBackgroundSpacing(parsed);
+    setIsBackgroundSpacingEditing(false);
   };
 
   const updateColorFromPalette = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -1096,71 +1180,6 @@ export function Whiteboard(): React.JSX.Element {
     });
   });
 
-  const renderRecordingFrame = (context: CanvasRenderingContext2D, targetWidth: number, targetHeight: number): void => {
-    if (lastRenderedRecordingVersionRef.current === recordingSceneVersionRef.current) return;
-    lastRenderedRecordingVersionRef.current = recordingSceneVersionRef.current;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const viewportWidth = canvas.clientWidth;
-    const viewportHeight = canvas.clientHeight;
-    const targetAspect = targetWidth / targetHeight;
-    const recordingWidth = Math.max(viewportWidth, viewportHeight * targetAspect);
-    const recordingHeight = Math.max(viewportHeight, viewportWidth / targetAspect);
-    const viewportOffsetX = (recordingWidth - viewportWidth) / 2;
-    const viewportOffsetY = (recordingHeight - viewportHeight) / 2;
-    const outputScaleX = targetWidth / recordingWidth;
-    const outputScaleY = targetHeight / recordingHeight;
-    const camera = cameraRef.current;
-    const recordingCameraX = camera.x + viewportOffsetX;
-    const recordingCameraY = camera.y + viewportOffsetY;
-    const backgroundFill = backgroundColorRef.current === 'black' ? '#111111' : backgroundColorRef.current === 'paper' ? '#F5EEDC' : '#ffffff';
-    const patternColor = backgroundColorRef.current === 'black' ? 'rgba(255,255,255,0.18)' : 'rgba(70,90,110,0.18)';
-    context.save();
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.scale(outputScaleX, outputScaleY);
-    context.fillStyle = backgroundFill;
-    context.fillRect(0, 0, recordingWidth, recordingHeight);
-    const rawPatternStep = backgroundSpacingRef.current * camera.zoom;
-    const patternStep = rawPatternStep < 4 ? rawPatternStep * Math.ceil(4 / rawPatternStep) : rawPatternStep;
-    const patternStartX = ((recordingCameraX % patternStep) + patternStep) % patternStep;
-    const patternStartY = ((recordingCameraY % patternStep) + patternStep) % patternStep;
-    context.fillStyle = patternColor;
-    context.strokeStyle = patternColor;
-    context.lineWidth = 1;
-    if (backgroundPatternRef.current === 'dots') {
-      const radius = clamp(1.4 * camera.zoom, .7, 2.5);
-      for (let y = patternStartY; y < recordingHeight; y += patternStep) for (let x = patternStartX; x < recordingWidth; x += patternStep) {
-        context.beginPath(); context.arc(x, y, radius, 0, Math.PI * 2); context.fill();
-      }
-    } else if (backgroundPatternRef.current === 'ruled' || backgroundPatternRef.current === 'grid') {
-      context.beginPath();
-      for (let y = patternStartY; y < recordingHeight; y += patternStep) { context.moveTo(0, y); context.lineTo(recordingWidth, y); }
-      if (backgroundPatternRef.current === 'grid') for (let x = patternStartX; x < recordingWidth; x += patternStep) { context.moveTo(x, 0); context.lineTo(x, recordingHeight); }
-      context.stroke();
-    }
-    context.save();
-    context.translate(recordingCameraX, recordingCameraY);
-    context.scale(camera.zoom, camera.zoom);
-    drawImportedImages(context);
-    const visibleLayerIds = new Set(layersRef.current.filter((layer) => layer.visible !== false).map((layer) => layer.id));
-    strokesRef.current.forEach((stroke) => { if (visibleLayerIds.has(stroke.layerId ?? DEFAULT_LAYER_ID)) drawStrokePath(context, stroke); });
-    if (activeStrokeRef.current) drawStrokePath(context, activeStrokeRef.current);
-    context.restore();
-    if (workspaceModeRef.current === 'review') reviewRef.current.placedStamps.forEach((stamp) => {
-      const definition = reviewRef.current.stampDefinitions.find((item) => item.id === stamp.definitionId);
-      if (!definition) return;
-      const x = recordingCameraX + stamp.x * camera.zoom;
-      const y = recordingCameraY + stamp.y * camera.zoom;
-      const size = definition.size ?? DEFAULT_STAMP_SIZE;
-      const radius = size * (definition.kind === 'theme' ? .94 : .86) / 2;
-      context.save(); context.fillStyle = backgroundColorRef.current === 'black' ? '#202733' : '#F7F3EB'; context.strokeStyle = definition.color; context.lineWidth = 2; context.beginPath();
-      if (definition.kind === 'theme') { context.moveTo(x, y - radius); context.lineTo(x + radius, y); context.lineTo(x, y + radius); context.lineTo(x - radius, y); context.closePath(); } else context.arc(x, y, radius, 0, Math.PI * 2);
-      context.fill(); context.stroke(); context.fillStyle = backgroundColorRef.current === 'black' ? '#F7F3EB' : '#202733';
-      const fontSize = Math.max(14, Math.round(size * .72)); context.font = `${definition.kind === 'theme' ? 600 : 500} ${fontSize}px "BIZ UDPGothic", "Yu Gothic", Meiryo, sans-serif`; context.fillText(definition.name, x + radius + 9, y + fontSize * .35); context.restore();
-    });
-    context.restore();
-  };
-
   const startRecording = async (): Promise<void> => {
     const canvas = canvasRef.current;
     if (!canvas || recordingState !== 'idle') return;
@@ -1168,7 +1187,25 @@ export function Whiteboard(): React.JSX.Element {
     try {
       stopAudioMonitor();
       setShowRecordingSettings(false);
-      lastRenderedRecordingVersionRef.current = -1;
+      recordingWasFullScreenRef.current = await window.michikusa.isFullScreen();
+      setRecordingViewportActive(true);
+      if (!recordingWasFullScreenRef.current) {
+        await window.michikusa.setFullScreen(true);
+      }
+      directRecordingRef.current = true;
+      await new Promise<void>((resolve) => requestAnimationFrame(() =>
+        requestAnimationFrame(() => resolve()),
+      ));
+      window.dispatchEvent(new CustomEvent('michikusa-resize-canvas'));
+      const [outputWidth, outputHeight] = getRecordingDimensions(recordingSettings.quality);
+      const conversionId = await window.michikusa.startRecordingConversion(
+        recordingSettings.fps,
+        recordingSettings.microphoneEnabled,
+        outputWidth,
+        outputHeight,
+      );
+      recordingConversionIdRef.current = conversionId;
+      recordingChunkWriteRef.current = Promise.resolve();
       const manager = new RecordingManager(canvas, {
         onStateChange: setRecordingState,
         onElapsedChange: setRecordingElapsed,
@@ -1176,14 +1213,28 @@ export function Whiteboard(): React.JSX.Element {
           setAudioLevelDbfs(rmsDbfs);
           setAudioPeakDbfs(peakDbfs);
         },
-      }, recordingSettings, renderRecordingFrame);
+        onDataChunk: (chunk) => {
+          recordingChunkWriteRef.current = recordingChunkWriteRef.current.then(async () => {
+            const bytes = new Uint8Array(await chunk.arrayBuffer());
+            await window.michikusa.writeRecordingConversion(conversionId, bytes);
+          });
+        },
+      }, recordingSettings);
 
       recordingManagerRef.current = manager;
       await manager.start();
       await refreshAudioDevices();
       setStatusMessage('録画中です');
     } catch (error) {
+      const conversionId = recordingConversionIdRef.current;
+      recordingConversionIdRef.current = null;
+      if (conversionId) await window.michikusa.abortRecordingConversion(conversionId).catch(() => undefined);
       recordingManagerRef.current = null;
+      directRecordingRef.current = false;
+      setRecordingViewportActive(false);
+      if (!recordingWasFullScreenRef.current) {
+        await window.michikusa.setFullScreen(false);
+      }
       const message = error instanceof Error ? error.message : String(error);
       window.alert(
         `録画を開始できませんでした。\nマイクの使用許可と接続を確認してください。\n\n${message}`,
@@ -1199,18 +1250,21 @@ export function Whiteboard(): React.JSX.Element {
     try {
       const recordingResult = await manager.stop();
       recordingManagerRef.current = null;
+      directRecordingRef.current = false;
+      setRecordingViewportActive(false);
+      if (!recordingWasFullScreenRef.current) {
+        await window.michikusa.setFullScreen(false);
+      }
 
-      if (!recordingResult || recordingResult.blob.size === 0) {
+      if (!recordingResult) {
         throw new Error('録画データが空です。');
       }
 
       setRecordingState('saving');
-      setStatusMessage('シーク可能な動画へ仕上げています');
-
-      const seekableBlob = await makeSeekableWebm(
-        recordingResult.blob,
-      );
-      const bytes = new Uint8Array(await seekableBlob.arrayBuffer());
+      setStatusMessage('録画データを仕上げています');
+      await recordingChunkWriteRef.current;
+      const conversionId = recordingConversionIdRef.current;
+      if (!conversionId) throw new Error('録画変換セッションが見つかりません。');
       const now = new Date();
       const stamp = [
         now.getFullYear(),
@@ -1222,13 +1276,11 @@ export function Whiteboard(): React.JSX.Element {
         String(now.getSeconds()).padStart(2, '0'),
       ].join('');
 
-      const saveResult = await window.michikusa.saveRecording(
-        bytes,
+      const saveResult = await window.michikusa.finishRecordingConversion(
+        conversionId,
         `道草45-${stamp}.avi`,
-        recordingSettings.fps,
-        recordingSettings.microphoneEnabled,
-        recordingResult.durationMilliseconds,
       );
+      recordingConversionIdRef.current = null;
 
       if (saveResult.canceled) {
         setStatusMessage('録画の保存をキャンセルしました');
@@ -1236,10 +1288,18 @@ export function Whiteboard(): React.JSX.Element {
         setStatusMessage(`録画を保存しました: ${saveResult.filePath}`);
       }
     } catch (error) {
+      const conversionId = recordingConversionIdRef.current;
+      recordingConversionIdRef.current = null;
+      if (conversionId) await window.michikusa.abortRecordingConversion(conversionId).catch(() => undefined);
       const message = error instanceof Error ? error.message : String(error);
       window.alert(`録画の停止または保存に失敗しました。\n${message}`);
       setStatusMessage('録画の保存に失敗しました');
     } finally {
+      directRecordingRef.current = false;
+      setRecordingViewportActive(false);
+      if (!recordingWasFullScreenRef.current) {
+        void window.michikusa.setFullScreen(false);
+      }
       setRecordingState('idle');
       setRecordingElapsed(0);
     }
@@ -1248,6 +1308,10 @@ export function Whiteboard(): React.JSX.Element {
   useEffect(() => {
     return () => {
       recordingManagerRef.current?.destroy();
+      const conversionId = recordingConversionIdRef.current;
+      if (conversionId) void window.michikusa.abortRecordingConversion(conversionId);
+      recordingConversionIdRef.current = null;
+      directRecordingRef.current = false;
     };
   }, []);
 
@@ -1347,10 +1411,7 @@ export function Whiteboard(): React.JSX.Element {
         }
         if (event.key === '[' || event.key === ']') {
           event.preventDefault();
-          const nextWidth = Math.round(clamp(widthRef.current + (event.key === ']' ? 0.1 : -0.1), 0.1, 48) * 10) / 10;
-          widthRef.current = nextWidth;
-          setLineWidth(nextWidth);
-          markDirty();
+          applyLineWidth(widthRef.current + (event.key === ']' ? 0.1 : -0.1));
           return;
         }
       }
@@ -1689,7 +1750,7 @@ export function Whiteboard(): React.JSX.Element {
     };
 
     const redraw = (): void => {
-      const ratio = window.devicePixelRatio || 1;
+      const ratio = window.devicePixelRatio ?? 1;
       const logicalWidth = canvas.clientWidth;
       const logicalHeight = canvas.clientHeight;
 
@@ -1753,7 +1814,7 @@ export function Whiteboard(): React.JSX.Element {
         if (visibleLayerIds.has(stroke.layerId ?? DEFAULT_LAYER_ID)) drawStroke(stroke);
       });
       if (activeStrokeRef.current) drawStroke(activeStrokeRef.current);
-      if (workspaceModeRef.current === 'illustration') {
+      if (workspaceModeRef.current === 'illustration' && !directRecordingRef.current) {
         const bounds = getEditableBounds();
         if (bounds) {
           context.save(); context.translate(camera.x, camera.y); context.scale(camera.zoom, camera.zoom);
@@ -1768,11 +1829,10 @@ export function Whiteboard(): React.JSX.Element {
       }
       drawReviewOverlay();
       context.restore();
-      recordingSceneVersionRef.current += 1;
     };
 
     const resize = (): void => {
-      const ratio = window.devicePixelRatio || 1;
+      const ratio = window.devicePixelRatio ?? 1;
       canvas.width = Math.max(1, Math.round(canvas.clientWidth * ratio));
       canvas.height = Math.max(1, Math.round(canvas.clientHeight * ratio));
       redraw();
@@ -2256,6 +2316,7 @@ export function Whiteboard(): React.JSX.Element {
     };
 
     const onExternalRedraw = (): void => redraw();
+    const onExternalResize = (): void => resize();
 
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
@@ -2275,6 +2336,7 @@ export function Whiteboard(): React.JSX.Element {
     });
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('michikusa-redraw', onExternalRedraw);
+    window.addEventListener('michikusa-resize-canvas', onExternalResize);
 
     resize();
 
@@ -2290,6 +2352,7 @@ export function Whiteboard(): React.JSX.Element {
       window.removeEventListener('wheel', onWheel, true);
       window.removeEventListener('blur', onWindowBlur);
       window.removeEventListener('michikusa-redraw', onExternalRedraw);
+      window.removeEventListener('michikusa-resize-canvas', onExternalResize);
     };
   }, []);
 
@@ -2492,7 +2555,7 @@ export function Whiteboard(): React.JSX.Element {
   void historyTick;
 
   return (
-    <section className="workspace">
+    <section className={`workspace${recordingViewportActive ? ' recording-viewport' : ''}`}>
       <nav className="app-menu-bar" onMouseLeave={() => setOpenMenu(null)}>
         <div className="app-menu">
           <button onClick={() => { setFileMenuPage('root'); setOpenMenu(openMenu === 'file' ? null : 'file'); }}>ファイル</button>
@@ -2576,17 +2639,46 @@ export function Whiteboard(): React.JSX.Element {
             <button onClick={() => changeBackground(undefined, 'ruled')}>{backgroundPattern === 'ruled' ? '✓ ' : ''}罫線</button>
             <button onClick={() => changeBackground(undefined, 'grid')}>{backgroundPattern === 'grid' ? '✓ ' : ''}方眼</button>
             <div className="menu-section-title">模様の間隔</div>
-            <label className="background-spacing-control">
+            <div className="background-spacing-control">
               <input
                 type="range"
                 min={MIN_BACKGROUND_SPACING}
                 max={MAX_BACKGROUND_SPACING}
                 step={4}
                 value={backgroundSpacing}
-                onChange={(event) => changeBackgroundSpacing(Number(event.target.value))}
+                onInput={(event) => changeBackgroundSpacing(Number(event.currentTarget.value))}
+                aria-label="模様の間隔"
               />
-              <span>{backgroundSpacing}</span>
-            </label>
+              {isBackgroundSpacingEditing ? <span className="background-spacing-editor">
+                <input
+                  type="number"
+                  min={MIN_BACKGROUND_SPACING}
+                  max={MAX_BACKGROUND_SPACING}
+                  step={1}
+                  value={backgroundSpacingDraft}
+                  autoFocus
+                  onFocus={(event) => event.currentTarget.select()}
+                  onChange={(event) => setBackgroundSpacingDraft(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      commitBackgroundSpacingEditing();
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setIsBackgroundSpacingEditing(false);
+                    }
+                  }}
+                  onBlur={commitBackgroundSpacingEditing}
+                  aria-label="模様の間隔を数値入力"
+                />
+                <span>px</span>
+              </span> : <button
+                type="button"
+                className="background-spacing-value"
+                onClick={beginBackgroundSpacingEditing}
+                title="クリックして数値入力"
+              >{backgroundSpacing} px</button>}
+            </div>
           </div>}
         </div>
         <div className="app-menu">
@@ -2716,7 +2808,7 @@ export function Whiteboard(): React.JSX.Element {
             </div>}
           </div>
 
-          <label className="width-control" title="ペンのサイズ">
+          <div className="width-control" title="ペンのサイズ">
             <span>サイズ</span>
             <input
               type="range"
@@ -2724,13 +2816,39 @@ export function Whiteboard(): React.JSX.Element {
               max="24"
               step="0.1"
               value={lineWidth}
-              onChange={(event) => {
-                setLineWidth(Number(event.target.value));
-                markDirty();
-              }}
+              onInput={(event) => applyLineWidth(Number(event.currentTarget.value))}
+              aria-label="ペンのサイズ"
             />
-            <output>{lineWidth.toFixed(1)} px</output>
-          </label>
+            {isLineWidthEditing ? <span className="width-number-editor">
+              <input
+                type="number"
+                min="0.1"
+                max="24"
+                step="0.1"
+                value={lineWidthDraft}
+                autoFocus
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(event) => setLineWidthDraft(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    commitLineWidthEditing();
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setIsLineWidthEditing(false);
+                  }
+                }}
+                onBlur={commitLineWidthEditing}
+                aria-label="ペンサイズを数値入力"
+              />
+              <span>px</span>
+            </span> : <button
+              type="button"
+              className="width-value-button"
+              onClick={beginLineWidthEditing}
+              title="クリックして数値入力"
+            >{lineWidth.toFixed(1)} px</button>}
+          </div>
         </div></> : <><div className="tool-group mode-tool-primary stamp-toolbar">
           <label>
             <span>スタンプ</span>
@@ -2862,7 +2980,7 @@ export function Whiteboard(): React.JSX.Element {
           })()}
           <button
             type="button"
-            className={showRecordingSettings ? 'active' : ''}
+            className={`recording-settings-toggle${showRecordingSettings ? ' active' : ''}`}
             onClick={() => setShowRecordingSettings((visible) => !visible)}
             disabled={recordingState !== 'idle'}
             title="録画設定"

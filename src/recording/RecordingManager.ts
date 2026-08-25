@@ -6,7 +6,6 @@ export type RecordingState =
   | 'saving';
 
 export type RecordingResult = {
-  blob: Blob;
   durationMilliseconds: number;
 };
 
@@ -57,15 +56,18 @@ type RecordingCallbacks = {
     decibelsFullScale: number,
     peakDecibelsFullScale: number,
   ) => void;
+  onDataChunk?: (chunk: Blob) => void;
 };
-type RecordingFrameRenderer = (context: CanvasRenderingContext2D, width: number, height: number) => void;
-
 const QUALITY_DIMENSIONS: Record<RecordingQuality, [number, number]> = {
   '720p': [1280, 720],
   '1080p': [1920, 1080],
   '1440p': [2560, 1440],
   '4k': [3840, 2160],
 };
+
+export const getRecordingDimensions = (
+  quality: RecordingQuality,
+): readonly [number, number] => QUALITY_DIMENSIONS[quality];
 
 const AUDIO_METER_FLOOR_DBFS = -60;
 const AUDIO_METER_ATTACK = 0.55;
@@ -286,11 +288,8 @@ const chooseMimeType = (withAudio: boolean): string => {
 
 export class RecordingManager {
   private readonly sourceCanvas: HTMLCanvasElement;
-  private readonly outputCanvas: HTMLCanvasElement;
   private readonly callbacks: RecordingCallbacks;
   private readonly settings: RecordingSettings;
-  private readonly outputContext: CanvasRenderingContext2D;
-  private readonly renderFrame?: RecordingFrameRenderer;
 
   private mediaRecorder: MediaRecorder | null = null;
   private microphoneStream: MediaStream | null = null;
@@ -298,7 +297,6 @@ export class RecordingManager {
   private animationFrameId: number | null = null;
   private timerId: number | null = null;
   private startedAt = 0;
-  private chunks: Blob[] = [];
   private audioContext: AudioContext | null = null;
   private audioAnalyser: AnalyserNode | null = null;
   private audioSamples: Float32Array<ArrayBuffer> | null = null;
@@ -309,29 +307,10 @@ export class RecordingManager {
     sourceCanvas: HTMLCanvasElement,
     callbacks: RecordingCallbacks,
     settings: RecordingSettings,
-    renderFrame?: RecordingFrameRenderer,
   ) {
     this.sourceCanvas = sourceCanvas;
     this.callbacks = callbacks;
     this.settings = settings;
-    this.renderFrame = renderFrame;
-    this.outputCanvas = document.createElement('canvas');
-    const [width, height] = QUALITY_DIMENSIONS[settings.quality];
-    this.outputCanvas.width = width;
-    this.outputCanvas.height = height;
-
-    const context = this.outputCanvas.getContext('2d', {
-      alpha: false,
-      desynchronized: true,
-    });
-
-    if (!context) {
-      throw new Error('録画用Canvasを作成できませんでした。');
-    }
-
-    this.outputContext = context;
-    this.outputContext.imageSmoothingEnabled = true;
-    this.outputContext.imageSmoothingQuality = 'high';
   }
 
   public async start(): Promise<void> {
@@ -366,7 +345,7 @@ export class RecordingManager {
 
       this.startFramePump();
 
-      const videoStream = this.outputCanvas.captureStream(this.settings.fps);
+      const videoStream = this.sourceCanvas.captureStream(this.settings.fps);
       const combined = new MediaStream([
         ...videoStream.getVideoTracks(),
         ...(this.outputStream?.getAudioTracks() ?? []),
@@ -374,15 +353,23 @@ export class RecordingManager {
       this.outputStream = combined;
 
       const mimeType = chooseMimeType(this.settings.microphoneEnabled);
-      this.chunks = [];
+      const sourcePixelsPerSecond =
+        this.sourceCanvas.width * this.sourceCanvas.height * this.settings.fps;
+      const preservationBitrate = Math.min(
+        100_000_000,
+        Math.round(sourcePixelsPerSecond * 0.14),
+      );
       this.mediaRecorder = new MediaRecorder(combined, {
         mimeType: mimeType || undefined,
-        videoBitsPerSecond: this.settings.videoBitsPerSecond,
+        videoBitsPerSecond: Math.max(
+          this.settings.videoBitsPerSecond,
+          preservationBitrate,
+        ),
         audioBitsPerSecond: this.settings.microphoneEnabled ? 192_000 : undefined,
       });
 
       this.mediaRecorder.addEventListener('dataavailable', (event) => {
-        if (event.data.size > 0) this.chunks.push(event.data);
+        if (event.data.size > 0) this.callbacks.onDataChunk?.(event.data);
       });
 
       this.startedAt = performance.now();
@@ -412,14 +399,11 @@ export class RecordingManager {
     );
 
     return new Promise<RecordingResult>((resolve, reject) => {
-      const mimeType = recorder.mimeType || 'video/webm';
-
       recorder.addEventListener(
         'stop',
         () => {
-          const blob = new Blob(this.chunks, { type: mimeType });
           this.cleanup();
-          resolve({ blob, durationMilliseconds });
+          resolve({ durationMilliseconds });
         },
         { once: true },
       );
@@ -445,60 +429,13 @@ export class RecordingManager {
   }
 
   private startFramePump(): void {
-    let nextFrameAt: number | null = null;
-    const frameInterval = 1000 / this.settings.fps;
-    const draw = (timestamp = performance.now()): void => {
-      const context = this.outputContext;
-      const targetWidth = this.outputCanvas.width;
-      const targetHeight = this.outputCanvas.height;
-      const sourceWidth = this.sourceCanvas.width;
-      const sourceHeight = this.sourceCanvas.height;
-
-      if (this.renderFrame) {
-        if (nextFrameAt === null || timestamp >= nextFrameAt) {
-          this.renderFrame(context, targetWidth, targetHeight);
-          if (nextFrameAt === null) {
-            nextFrameAt = timestamp + frameInterval;
-          } else {
-            const skippedIntervals = Math.floor(
-              (timestamp - nextFrameAt) / frameInterval,
-            );
-            nextFrameAt += (skippedIntervals + 1) * frameInterval;
-          }
-        }
+    const update = (): void => {
+      if (this.audioAnalyser) {
         this.updateAudioLevel();
-        this.animationFrameId = requestAnimationFrame(draw);
-        return;
       }
-
-      context.fillStyle = '#ffffff';
-      context.fillRect(0, 0, targetWidth, targetHeight);
-
-      if (sourceWidth > 0 && sourceHeight > 0) {
-        const scale = Math.min(
-          targetWidth / sourceWidth,
-          targetHeight / sourceHeight,
-        );
-        const drawWidth = sourceWidth * scale;
-        const drawHeight = sourceHeight * scale;
-        const offsetX = (targetWidth - drawWidth) / 2;
-        const offsetY = (targetHeight - drawHeight) / 2;
-
-        context.drawImage(
-          this.sourceCanvas,
-          offsetX,
-          offsetY,
-          drawWidth,
-          drawHeight,
-        );
-      }
-
-      this.updateAudioLevel();
-
-      this.animationFrameId = requestAnimationFrame(draw);
+      this.animationFrameId = requestAnimationFrame(update);
     };
-
-    draw();
+    update();
   }
 
   private updateAudioLevel(): void {
@@ -535,7 +472,6 @@ export class RecordingManager {
     this.microphoneStream = null;
     this.outputStream = null;
     this.mediaRecorder = null;
-    this.chunks = [];
     this.audioAnalyser = null;
     this.audioSamples = null;
     this.displayedRmsDbfs = AUDIO_METER_FLOOR_DBFS;

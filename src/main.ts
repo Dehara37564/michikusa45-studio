@@ -11,6 +11,7 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type {
   OpenProjectResult,
@@ -35,12 +36,43 @@ const getFfmpegPath = (): string =>
     ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe')
     : path.join(process.cwd(), 'assets', 'ffmpeg', 'ffmpeg.exe');
 
+const buildAviOutputArguments = (
+  fps: 30 | 60,
+  withAudio: boolean,
+  outputWidth: number,
+  outputHeight: number,
+): string[] => [
+  '-map',
+  '0:v:0',
+  '-vf',
+  withAudio
+    ? `fps=${fps},scale=${outputWidth}:${outputHeight}:flags=lanczos+accurate_rnd+full_chroma_int:force_original_aspect_ratio=increase:out_range=tv,crop=${outputWidth}:${outputHeight},setsar=1,format=yuv422p,tpad=stop_mode=clone:stop_duration=86400`
+    : `fps=${fps},scale=${outputWidth}:${outputHeight}:flags=lanczos+accurate_rnd+full_chroma_int:force_original_aspect_ratio=increase:out_range=tv,crop=${outputWidth}:${outputHeight},setsar=1,format=yuv422p`,
+  '-fps_mode',
+  'cfr',
+  '-c:v',
+  'mjpeg',
+  '-strict',
+  'unofficial',
+  '-q:v',
+  '1',
+  '-pix_fmt',
+  'yuv422p',
+  '-color_range',
+  'tv',
+  ...(withAudio ? [
+    '-map', '0:a:0', '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2',
+  ] : []),
+];
+
 const convertWebmToAvi = async (
   inputPath: string,
   outputPath: string,
   fps: 30 | 60,
   withAudio: boolean,
   durationMilliseconds: number,
+  outputWidth: number,
+  outputHeight: number,
 ): Promise<void> => {
   const ffmpegPath = getFfmpegPath();
   await fs.access(ffmpegPath);
@@ -53,40 +85,14 @@ const convertWebmToAvi = async (
       '-y',
       '-i',
       inputPath,
-      '-map',
-      '0:v:0',
-      '-vf',
-      withAudio
-        ? `fps=${fps},tpad=stop_mode=clone:stop_duration=86400`
-        : `fps=${fps}`,
-      '-fps_mode',
-      'cfr',
-      '-c:v',
-      'mjpeg',
-      '-q:v',
-      '3',
-      '-pix_fmt',
-      'yuvj420p',
+      ...buildAviOutputArguments(fps, withAudio, outputWidth, outputHeight),
     ];
-    const audioArguments = withAudio
-      ? [
-          '-map',
-          '0:a:0',
-          '-c:a',
-          'pcm_s16le',
-          '-ar',
-          '48000',
-          '-ac',
-          '2',
-        ]
-      : [];
     const durationSeconds = Math.max(
       0.001,
       durationMilliseconds / 1000,
     ).toFixed(3);
     const process = spawn(ffmpegPath, [
       ...inputArguments,
-      ...audioArguments,
       '-t',
       durationSeconds,
       outputPath,
@@ -112,6 +118,72 @@ const convertWebmToAvi = async (
       );
     });
   });
+};
+
+type RecordingConversionSession = {
+  process: ReturnType<typeof spawn>;
+  temporaryDirectory: string;
+  outputPath: string;
+  completed: Promise<void>;
+  error?: Error;
+};
+
+const recordingConversionSessions = new Map<string, RecordingConversionSession>();
+
+const startRecordingConversion = async (
+  fps: 30 | 60,
+  withAudio: boolean,
+  outputWidth: number,
+  outputHeight: number,
+): Promise<string> => {
+  const ffmpegPath = getFfmpegPath();
+  await fs.access(ffmpegPath);
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'michikusa45-stream-'));
+  const outputPath = path.join(temporaryDirectory, 'recording.avi');
+  const process = spawn(ffmpegPath, [
+    '-hide_banner', '-loglevel', 'error', '-y', '-i', 'pipe:0',
+    ...buildAviOutputArguments(fps, withAudio, outputWidth, outputHeight),
+    ...(withAudio ? ['-shortest'] : []),
+    outputPath,
+  ], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+  if (process.pid) {
+    try {
+      os.setPriority(process.pid, os.constants.priority.PRIORITY_BELOW_NORMAL);
+    } catch {
+      // Priority adjustment is an optimization; conversion can continue without it.
+    }
+  }
+  const id = randomUUID();
+  let stderr = '';
+  process.stderr?.setEncoding('utf8');
+  process.stderr?.on('data', (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-16_384);
+  });
+  let session: RecordingConversionSession;
+  const completed = new Promise<void>((resolve) => {
+    process.once('error', (error) => {
+      session.error = error;
+      resolve();
+    });
+    process.once('close', (code) => {
+      if (code !== 0 && !session.error) {
+        session.error = new Error(`AVI conversion failed (exit code ${code ?? 'unknown'}).${stderr ? `\n${stderr.trim()}` : ''}`);
+      }
+      resolve();
+    });
+  });
+  session = { process, temporaryDirectory, outputPath, completed };
+  recordingConversionSessions.set(id, session);
+  return id;
+};
+
+const discardRecordingConversion = async (id: string): Promise<void> => {
+  const conversion = recordingConversionSessions.get(id);
+  if (!conversion) return;
+  recordingConversionSessions.delete(id);
+  conversion.process.stdin?.destroy();
+  if (conversion.process.exitCode === null) conversion.process.kill();
+  await fs.rm(conversion.temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
 };
 
 type MenuPresets = {
@@ -376,6 +448,10 @@ ipcMain.handle('window:set-fullscreen', (_event, fullScreen: boolean) => {
   BrowserWindow.getFocusedWindow()?.setFullScreen(fullScreen);
 });
 
+ipcMain.handle('window:is-fullscreen', () =>
+  BrowserWindow.getFocusedWindow()?.isFullScreen() ?? false,
+);
+
 ipcMain.handle('app:quit', () => app.quit());
 
 const isProjectFile = (value: unknown): value is ReadableProjectFile => {
@@ -420,6 +496,31 @@ const createWindow = (): void => {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+  let allowCloseWithIncompleteRecording = false;
+  let closeConfirmationOpen = false;
+  win.on('close', (event) => {
+    if (allowCloseWithIncompleteRecording || recordingConversionSessions.size === 0) return;
+    event.preventDefault();
+    if (closeConfirmationOpen) return;
+    closeConfirmationOpen = true;
+    void dialog.showMessageBox(win, {
+      type: 'warning',
+      title: '録画データの保存確認',
+      message: '録画データの保存が完了していません。アプリケーションを閉じてよいですか？',
+      buttons: ['いいえ', 'はい'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    }).then(async ({ response }) => {
+      closeConfirmationOpen = false;
+      if (response !== 1) return;
+      allowCloseWithIncompleteRecording = true;
+      await Promise.all(
+        [...recordingConversionSessions.keys()].map(discardRecordingConversion),
+      );
+      win.close();
+    });
   });
 
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
@@ -528,6 +629,77 @@ ipcMain.handle('image:open', async () => {
 
 
 ipcMain.handle(
+  'recording:conversion-start',
+  async (
+    _event,
+    fps: 30 | 60,
+    withAudio: boolean,
+    outputWidth: number,
+    outputHeight: number,
+  ): Promise<string> => startRecordingConversion(
+    fps === 60 ? 60 : 30,
+    withAudio === true,
+    Number.isFinite(outputWidth) ? Math.max(2, Math.round(outputWidth / 2) * 2) : 1920,
+    Number.isFinite(outputHeight) ? Math.max(2, Math.round(outputHeight / 2) * 2) : 1080,
+  ),
+);
+
+ipcMain.handle(
+  'recording:conversion-write',
+  async (_event, id: string, bytes: Uint8Array): Promise<void> => {
+    const conversion = recordingConversionSessions.get(id);
+    if (!conversion) throw new Error('録画変換セッションが見つかりません。');
+    if (conversion.error) throw conversion.error;
+    const input = conversion.process.stdin;
+    if (!input || input.destroyed || !input.writable) {
+      throw conversion.error ?? new Error('録画変換への書き込みが終了しています。');
+    }
+    const buffer = Buffer.from(bytes);
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => reject(error);
+      input.once('error', onError);
+      const finish = (): void => {
+        input.removeListener('error', onError);
+        resolve();
+      };
+      if (input.write(buffer)) finish();
+      else input.once('drain', finish);
+    });
+  },
+);
+
+ipcMain.handle(
+  'recording:conversion-finish',
+  async (_event, id: string, suggestedName: string): Promise<SaveRecordingResult> => {
+    const conversion = recordingConversionSessions.get(id);
+    if (!conversion) throw new Error('録画変換セッションが見つかりません。');
+    const result = await dialog.showSaveDialog({
+      title: '録画を保存',
+      defaultPath: suggestedName,
+      filters: [{ name: 'AVI video', extensions: ['avi'] }],
+    });
+    if (result.canceled || !result.filePath) {
+      await discardRecordingConversion(id);
+      return { canceled: true };
+    }
+    const filePath = result.filePath.toLowerCase().endsWith('.avi') ? result.filePath : `${result.filePath}.avi`;
+    conversion.process.stdin?.end();
+    await conversion.completed;
+    if (conversion.error) {
+      await discardRecordingConversion(id);
+      throw conversion.error;
+    }
+    await fs.copyFile(conversion.outputPath, filePath);
+    await discardRecordingConversion(id);
+    return { canceled: false, filePath };
+  },
+);
+
+ipcMain.handle('recording:conversion-abort', async (_event, id: string): Promise<void> => {
+  await discardRecordingConversion(id);
+});
+
+ipcMain.handle(
   'recording:save',
   async (
     _event,
@@ -536,6 +708,8 @@ ipcMain.handle(
     fps: 30 | 60,
     withAudio: boolean,
     durationMilliseconds: number,
+    outputWidth: number,
+    outputHeight: number,
   ): Promise<SaveRecordingResult> => {
     const result = await dialog.showSaveDialog({
       title: '録画を保存',
@@ -570,6 +744,8 @@ ipcMain.handle(
         frameRate,
         withAudio === true,
         Number.isFinite(durationMilliseconds) ? durationMilliseconds : 1,
+        Number.isFinite(outputWidth) ? Math.max(2, Math.round(outputWidth / 2) * 2) : 1920,
+        Number.isFinite(outputHeight) ? Math.max(2, Math.round(outputHeight / 2) * 2) : 1080,
       );
       await fs.copyFile(convertedPath, filePath);
       return { canceled: false, filePath };

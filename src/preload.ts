@@ -33,13 +33,31 @@ contextBridge.exposeInMainWorld('michikusa', {
     ipcRenderer.invoke('menu:remove-preset', preset),
   setFullScreen: (fullScreen: boolean): Promise<void> =>
     ipcRenderer.invoke('window:set-fullscreen', fullScreen),
+  isFullScreen: (): Promise<boolean> =>
+    ipcRenderer.invoke('window:is-fullscreen'),
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
+  startRecordingConversion: (
+    fps: 30 | 60,
+    withAudio: boolean,
+    outputWidth: number,
+    outputHeight: number,
+  ): Promise<string> => ipcRenderer.invoke(
+    'recording:conversion-start', fps, withAudio, outputWidth, outputHeight,
+  ),
+  writeRecordingConversion: (id: string, bytes: Uint8Array): Promise<void> =>
+    ipcRenderer.invoke('recording:conversion-write', id, bytes),
+  finishRecordingConversion: (id: string, suggestedName: string): Promise<SaveRecordingResult> =>
+    ipcRenderer.invoke('recording:conversion-finish', id, suggestedName),
+  abortRecordingConversion: (id: string): Promise<void> =>
+    ipcRenderer.invoke('recording:conversion-abort', id),
   saveRecording: (
     bytes: Uint8Array,
     suggestedName: string,
     fps: 30 | 60,
     withAudio: boolean,
     durationMilliseconds: number,
+    outputWidth: number,
+    outputHeight: number,
   ): Promise<SaveRecordingResult> =>
     ipcRenderer.invoke(
       'recording:save',
@@ -48,6 +66,8 @@ contextBridge.exposeInMainWorld('michikusa', {
       fps,
       withAudio,
       durationMilliseconds,
+      outputWidth,
+      outputHeight,
     ),
   savePng: (bytes: Uint8Array, suggestedName: string): Promise<{ canceled: boolean; filePath?: string }> =>
     ipcRenderer.invoke('image:save-png', bytes, suggestedName),
