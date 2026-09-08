@@ -866,11 +866,12 @@ button:disabled {
 
 .audio-filter-presets {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
 }
 
 .audio-filter-presets select,
+.audio-filter-presets input,
 .audio-filter-presets button {
   min-width: 0;
   min-height: 30px;

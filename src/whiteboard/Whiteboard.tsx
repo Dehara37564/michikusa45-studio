@@ -602,6 +602,7 @@ export function Whiteboard(): React.JSX.Element {
     useState<AudioFilterPreset[]>(loadAudioFilterPresets);
   const [selectedAudioFilterPresetId, setSelectedAudioFilterPresetId] =
     useState('');
+  const [audioFilterPresetName, setAudioFilterPresetName] = useState('');
   const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [showReviewSummary, setShowReviewSummary] = useState(false);
   const [showWrapSummary, setShowWrapSummary] = useState(false);
@@ -731,6 +732,7 @@ export function Whiteboard(): React.JSX.Element {
   const applyAudioFilterPreset = (presetId: string): void => {
     setSelectedAudioFilterPresetId(presetId);
     const preset = audioFilterPresets.find((candidate) => candidate.id === presetId);
+    setAudioFilterPresetName(preset?.name ?? '');
     if (!preset) return;
     setRecordingSettings((settings) => ({
       ...settings,
@@ -746,12 +748,7 @@ export function Whiteboard(): React.JSX.Element {
     const selectedPreset = audioFilterPresets.find(
       (preset) => preset.id === selectedAudioFilterPresetId,
     );
-    const enteredName = window.prompt(
-      '音声フィルタープリセット名',
-      selectedPreset?.name ?? '',
-    );
-    if (enteredName === null) return;
-    const name = enteredName.trim().slice(0, 40);
+    const name = audioFilterPresetName.trim().slice(0, 40);
     if (!name) {
       window.alert('プリセット名を入力してください。');
       return;
@@ -772,6 +769,7 @@ export function Whiteboard(): React.JSX.Element {
       return presets.map((preset, index) => index === existingIndex ? nextPreset : preset);
     });
     setSelectedAudioFilterPresetId(id);
+    setAudioFilterPresetName(name);
     setStatusMessage(`音声プリセット「${name}」を登録しました`);
   };
 
@@ -784,6 +782,7 @@ export function Whiteboard(): React.JSX.Element {
       (preset) => preset.id !== selectedPreset.id,
     ));
     setSelectedAudioFilterPresetId('');
+    setAudioFilterPresetName('');
     setStatusMessage(`音声プリセット「${selectedPreset.name}」を削除しました`);
   };
 
@@ -3205,7 +3204,6 @@ export function Whiteboard(): React.JSX.Element {
                     <option key={preset.id} value={preset.id}>{preset.name}</option>
                   ))}
                 </select>
-                <button type="button" onClick={saveAudioFilterPreset}>登録</button>
                 <button
                   type="button"
                   className="audio-filter-preset-delete"
@@ -3214,6 +3212,20 @@ export function Whiteboard(): React.JSX.Element {
                 >
                   削除
                 </button>
+                <input
+                  type="text"
+                  value={audioFilterPresetName}
+                  maxLength={40}
+                  placeholder="プリセット名"
+                  aria-label="登録するプリセット名"
+                  onChange={(event) => setAudioFilterPresetName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter') return;
+                    event.preventDefault();
+                    saveAudioFilterPreset();
+                  }}
+                />
+                <button type="button" onClick={saveAudioFilterPreset}>登録</button>
               </div>
               <div className="audio-monitor-readout">
                 <div className="audio-monitor-axis-title">レベル（dBFS）</div>
