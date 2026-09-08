@@ -197,6 +197,16 @@ button:disabled {
   z-index: 100;
 }
 
+.recording-viewport > .toolbar:has(.color-picker-popover) {
+  position: absolute;
+  overflow: visible;
+  z-index: 100;
+}
+
+.recording-viewport .color-picker-popover {
+  z-index: 110;
+}
+
 .brand {
   display: flex;
   flex: 0 0 auto;
@@ -852,6 +862,23 @@ button:disabled {
 .audio-filter-heading button {
   min-height: 28px;
   font-size: 12px;
+}
+
+.audio-filter-presets {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+}
+
+.audio-filter-presets select,
+.audio-filter-presets button {
+  min-width: 0;
+  min-height: 30px;
+  font-size: 12px;
+}
+
+.audio-filter-preset-delete:not(:disabled) {
+  color: var(--color-danger);
 }
 
 .audio-monitor-readout {

@@ -3,7 +3,7 @@ import type {
   ProjectFile,
   SaveProjectResult,
 } from './shared/project';
-import type { SaveRecordingResult } from './shared/recording';
+import type { SaveRecordingResult, StartRecordingConversionResult } from './shared/recording';
 import type { MenuCommand, MenuPreset } from './shared/menu';
 
 declare global {
@@ -30,9 +30,11 @@ declare global {
         withAudio: boolean,
         outputWidth: number,
         outputHeight: number,
-      ) => Promise<string>;
+        mjpegQuality: 1 | 3 | 5,
+        suggestedName: string,
+      ) => Promise<StartRecordingConversionResult>;
       writeRecordingConversion: (id: string, bytes: Uint8Array) => Promise<void>;
-      finishRecordingConversion: (id: string, suggestedName: string) => Promise<SaveRecordingResult>;
+      finishRecordingConversion: (id: string) => Promise<SaveRecordingResult>;
       abortRecordingConversion: (id: string) => Promise<void>;
       saveRecording: (
         bytes: Uint8Array,

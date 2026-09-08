@@ -46,6 +46,7 @@ export type RecordingSettings = {
     | 45_000_000
     | 68_000_000;
   fps: 30 | 60;
+  mjpegQuality: 1 | 3 | 5;
   audioFilters: AudioFilterSettings;
 };
 
@@ -73,6 +74,7 @@ const AUDIO_METER_FLOOR_DBFS = -60;
 const AUDIO_METER_ATTACK = 0.55;
 const AUDIO_METER_RELEASE = 0.12;
 const AUDIO_METER_PEAK_DECAY_DB_PER_FRAME = 0.22;
+const VIDEO_HEARTBEAT_INTERVAL_MS = 250;
 
 const decibelsToGain = (decibels: number): number => 10 ** (decibels / 20);
 
@@ -294,6 +296,12 @@ export class RecordingManager {
   private mediaRecorder: MediaRecorder | null = null;
   private microphoneStream: MediaStream | null = null;
   private outputStream: MediaStream | null = null;
+  private recordingCanvas: HTMLCanvasElement | null = null;
+  private recordingContext: CanvasRenderingContext2D | null = null;
+  private videoCaptureTrack: CanvasCaptureMediaStreamTrack | null = null;
+  private videoFrameTimerId: number | null = null;
+  private videoFrameDirty = true;
+  private lastVideoFrameAt = 0;
   private animationFrameId: number | null = null;
   private timerId: number | null = null;
   private startedAt = 0;
@@ -343,9 +351,28 @@ export class RecordingManager {
         this.outputStream = processedAudio.stream;
       }
 
-      this.startFramePump();
+      const [outputWidth, outputHeight] = getRecordingDimensions(
+        this.settings.quality,
+      );
+      this.recordingCanvas = document.createElement('canvas');
+      this.recordingCanvas.width = outputWidth;
+      this.recordingCanvas.height = outputHeight;
+      this.recordingContext = this.recordingCanvas.getContext('2d', {
+        alpha: false,
+      });
+      if (!this.recordingContext) {
+        throw new Error('録画用キャンバスを初期化できませんでした。');
+      }
+      this.recordingContext.imageSmoothingEnabled = true;
+      this.recordingContext.imageSmoothingQuality = 'high';
+      this.copySourceCanvasToRecordingCanvas();
 
-      const videoStream = this.sourceCanvas.captureStream(this.settings.fps);
+      // Manual frame requests avoid encoding identical 4K display frames at
+      // 60 fps. FFmpeg still normalizes the completed AVI to the selected CFR.
+      const videoStream = this.recordingCanvas.captureStream(0);
+      this.videoCaptureTrack = videoStream.getVideoTracks()[0] as
+        CanvasCaptureMediaStreamTrack | undefined ?? null;
+      this.startFramePump();
       const combined = new MediaStream([
         ...videoStream.getVideoTracks(),
         ...(this.outputStream?.getAudioTracks() ?? []),
@@ -354,7 +381,7 @@ export class RecordingManager {
 
       const mimeType = chooseMimeType(this.settings.microphoneEnabled);
       const sourcePixelsPerSecond =
-        this.sourceCanvas.width * this.sourceCanvas.height * this.settings.fps;
+        outputWidth * outputHeight * this.settings.fps;
       const preservationBitrate = Math.min(
         100_000_000,
         Math.round(sourcePixelsPerSecond * 0.14),
@@ -379,6 +406,20 @@ export class RecordingManager {
       }, 200);
 
       this.mediaRecorder.start(1000);
+      this.flushVideoFrame();
+      const frameIntervalMilliseconds = Math.max(
+        8,
+        Math.round(1000 / this.settings.fps),
+      );
+      this.videoFrameTimerId = window.setInterval(() => {
+        const now = performance.now();
+        if (
+          this.videoFrameDirty ||
+          now - this.lastVideoFrameAt >= VIDEO_HEARTBEAT_INTERVAL_MS
+        ) {
+          this.flushVideoFrame();
+        }
+      }, frameIntervalMilliseconds);
       this.callbacks.onStateChange('recording');
     } catch (error) {
       this.cleanup();
@@ -392,6 +433,8 @@ export class RecordingManager {
     if (!recorder || recorder.state === 'inactive') return null;
 
     this.callbacks.onStateChange('stopping');
+    this.flushVideoFrame();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
     const durationMilliseconds = Math.max(
       1,
@@ -421,6 +464,14 @@ export class RecordingManager {
     });
   }
 
+  public markVideoFrameDirty(): void {
+    this.videoFrameDirty = true;
+  }
+
+  public requestVideoFrame(): void {
+    this.flushVideoFrame();
+  }
+
   public destroy(): void {
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       this.mediaRecorder.stop();
@@ -436,6 +487,56 @@ export class RecordingManager {
       this.animationFrameId = requestAnimationFrame(update);
     };
     update();
+  }
+
+  private copySourceCanvasToRecordingCanvas(): void {
+    const canvas = this.recordingCanvas;
+    const context = this.recordingContext;
+    if (!canvas || !context || this.sourceCanvas.width < 1 || this.sourceCanvas.height < 1) {
+      return;
+    }
+
+    const sourceWidth = this.sourceCanvas.width;
+    const sourceHeight = this.sourceCanvas.height;
+    const sourceAspectRatio = sourceWidth / sourceHeight;
+    const targetAspectRatio = canvas.width / canvas.height;
+    let sourceX = 0;
+    let sourceY = 0;
+    let croppedWidth = sourceWidth;
+    let croppedHeight = sourceHeight;
+
+    if (sourceAspectRatio > targetAspectRatio) {
+      croppedWidth = sourceHeight * targetAspectRatio;
+      sourceX = (sourceWidth - croppedWidth) / 2;
+    } else if (sourceAspectRatio < targetAspectRatio) {
+      croppedHeight = sourceWidth / targetAspectRatio;
+      sourceY = (sourceHeight - croppedHeight) / 2;
+    }
+
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(
+      this.sourceCanvas,
+      sourceX,
+      sourceY,
+      croppedWidth,
+      croppedHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    );
+    context.restore();
+  }
+
+  private flushVideoFrame(): void {
+    if (!this.videoCaptureTrack || !this.recordingCanvas) return;
+    this.copySourceCanvasToRecordingCanvas();
+    this.videoCaptureTrack.requestFrame();
+    this.videoFrameDirty = false;
+    this.lastVideoFrameAt = performance.now();
   }
 
   private updateAudioLevel(): void {
@@ -466,11 +567,21 @@ export class RecordingManager {
       this.timerId = null;
     }
 
+    if (this.videoFrameTimerId !== null) {
+      clearInterval(this.videoFrameTimerId);
+      this.videoFrameTimerId = null;
+    }
+
     this.microphoneStream?.getTracks().forEach((track) => track.stop());
     this.outputStream?.getTracks().forEach((track) => track.stop());
 
     this.microphoneStream = null;
     this.outputStream = null;
+    this.recordingCanvas = null;
+    this.recordingContext = null;
+    this.videoCaptureTrack = null;
+    this.videoFrameDirty = true;
+    this.lastVideoFrameAt = 0;
     this.mediaRecorder = null;
     this.audioAnalyser = null;
     this.audioSamples = null;

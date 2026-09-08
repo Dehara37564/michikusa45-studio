@@ -12,7 +12,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { createWriteStream, promises as fs, type WriteStream } from 'node:fs';
 import type {
   OpenProjectResult,
   ProjectFile,
@@ -20,7 +20,7 @@ import type {
   SaveProjectResult,
 } from './shared/project';
 import { migrateProject } from './shared/migration';
-import type { SaveRecordingResult } from './shared/recording';
+import type { SaveRecordingResult, StartRecordingConversionResult } from './shared/recording';
 import type { MenuCommand, MenuPreset } from './shared/menu';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
@@ -41,13 +41,12 @@ const buildAviOutputArguments = (
   withAudio: boolean,
   outputWidth: number,
   outputHeight: number,
+  mjpegQuality: 1 | 3 | 5,
 ): string[] => [
   '-map',
   '0:v:0',
   '-vf',
-  withAudio
-    ? `fps=${fps},scale=${outputWidth}:${outputHeight}:flags=lanczos+accurate_rnd+full_chroma_int:force_original_aspect_ratio=increase:out_range=tv,crop=${outputWidth}:${outputHeight},setsar=1,format=yuv422p,tpad=stop_mode=clone:stop_duration=86400`
-    : `fps=${fps},scale=${outputWidth}:${outputHeight}:flags=lanczos+accurate_rnd+full_chroma_int:force_original_aspect_ratio=increase:out_range=tv,crop=${outputWidth}:${outputHeight},setsar=1,format=yuv422p`,
+  `scale=${outputWidth}:${outputHeight}:flags=lanczos+accurate_rnd+full_chroma_int:force_original_aspect_ratio=increase:out_range=tv,crop=${outputWidth}:${outputHeight},setsar=1,format=yuv422p,fps=${fps}`,
   '-fps_mode',
   'cfr',
   '-c:v',
@@ -55,13 +54,14 @@ const buildAviOutputArguments = (
   '-strict',
   'unofficial',
   '-q:v',
-  '1',
+  String(mjpegQuality),
   '-pix_fmt',
   'yuv422p',
   '-color_range',
   'tv',
   ...(withAudio ? [
-    '-map', '0:a:0', '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2',
+    '-map', '0:a:0', '-af', 'apad', '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2',
+    '-shortest_buf_duration', '0.5', '-shortest',
   ] : []),
 ];
 
@@ -70,9 +70,10 @@ const convertWebmToAvi = async (
   outputPath: string,
   fps: 30 | 60,
   withAudio: boolean,
-  durationMilliseconds: number,
+  durationMilliseconds: number | null,
   outputWidth: number,
   outputHeight: number,
+  mjpegQuality: 1 | 3 | 5 = 3,
 ): Promise<void> => {
   const ffmpegPath = getFfmpegPath();
   await fs.access(ffmpegPath);
@@ -85,16 +86,14 @@ const convertWebmToAvi = async (
       '-y',
       '-i',
       inputPath,
-      ...buildAviOutputArguments(fps, withAudio, outputWidth, outputHeight),
+      ...buildAviOutputArguments(fps, withAudio, outputWidth, outputHeight, mjpegQuality),
     ];
-    const durationSeconds = Math.max(
-      0.001,
-      durationMilliseconds / 1000,
-    ).toFixed(3);
     const process = spawn(ffmpegPath, [
       ...inputArguments,
-      '-t',
-      durationSeconds,
+      ...(durationMilliseconds === null ? [] : [
+        '-t',
+        Math.max(0.001, durationMilliseconds / 1000).toFixed(3),
+      ]),
       outputPath,
     ], { windowsHide: true });
 
@@ -122,28 +121,76 @@ const convertWebmToAvi = async (
 
 type RecordingConversionSession = {
   process: ReturnType<typeof spawn>;
-  temporaryDirectory: string;
   outputPath: string;
   completed: Promise<void>;
+  recoveryPath: string;
+  recoveryStream: WriteStream;
+  recoveryCompleted: Promise<void>;
+  fps: 30 | 60;
+  withAudio: boolean;
+  outputWidth: number;
+  outputHeight: number;
+  mjpegQuality: 1 | 3 | 5;
   error?: Error;
+  recoveryError?: Error;
 };
 
 const recordingConversionSessions = new Map<string, RecordingConversionSession>();
+const MAX_FFMPEG_INPUT_BUFFER_BYTES = 64 * 1024 * 1024;
+
+const writeBuffer = async (stream: WriteStream, buffer: Buffer): Promise<void> => {
+  if (stream.destroyed || !stream.writable) {
+    throw new Error('録画復旧データへの書き込みが終了しています。');
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    stream.once('error', onError);
+    const finish = (): void => {
+      stream.removeListener('error', onError);
+      resolve();
+    };
+    if (stream.write(buffer)) finish();
+    else stream.once('drain', finish);
+  });
+};
+
+const stopLiveConversion = (
+  conversion: RecordingConversionSession,
+  error: Error,
+): void => {
+  if (!conversion.error) conversion.error = error;
+  conversion.process.stdin?.destroy();
+  if (conversion.process.exitCode === null) conversion.process.kill();
+};
 
 const startRecordingConversion = async (
   fps: 30 | 60,
   withAudio: boolean,
   outputWidth: number,
   outputHeight: number,
-): Promise<string> => {
+  mjpegQuality: 1 | 3 | 5,
+  suggestedName: string,
+): Promise<StartRecordingConversionResult> => {
+  const saveResult = await dialog.showSaveDialog({
+    title: '録画の保存先を選択',
+    defaultPath: suggestedName,
+    filters: [{ name: 'AVI video', extensions: ['avi'] }],
+  });
+  if (saveResult.canceled || !saveResult.filePath) return { canceled: true };
+  const outputPath = saveResult.filePath.toLowerCase().endsWith('.avi')
+    ? saveResult.filePath
+    : `${saveResult.filePath}.avi`;
   const ffmpegPath = getFfmpegPath();
   await fs.access(ffmpegPath);
-  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'michikusa45-stream-'));
-  const outputPath = path.join(temporaryDirectory, 'recording.avi');
+  const id = randomUUID();
+  const recoveryPath = path.join(
+    path.dirname(outputPath),
+    `.${path.basename(outputPath)}.${id}.recovery.webm`,
+  );
+  const recoveryStream = createWriteStream(recoveryPath, { flags: 'wx' });
   const process = spawn(ffmpegPath, [
     '-hide_banner', '-loglevel', 'error', '-y', '-i', 'pipe:0',
-    ...buildAviOutputArguments(fps, withAudio, outputWidth, outputHeight),
-    ...(withAudio ? ['-shortest'] : []),
+    ...buildAviOutputArguments(fps, withAudio, outputWidth, outputHeight, mjpegQuality),
     outputPath,
   ], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
   if (process.pid) {
@@ -153,13 +200,20 @@ const startRecordingConversion = async (
       // Priority adjustment is an optimization; conversion can continue without it.
     }
   }
-  const id = randomUUID();
   let stderr = '';
   process.stderr?.setEncoding('utf8');
   process.stderr?.on('data', (chunk: string) => {
     stderr = `${stderr}${chunk}`.slice(-16_384);
   });
   let session: RecordingConversionSession;
+  const recoveryCompleted = new Promise<void>((resolve) => {
+    recoveryStream.once('error', (error) => {
+      session.recoveryError = error;
+      resolve();
+    });
+    recoveryStream.once('finish', resolve);
+    recoveryStream.once('close', resolve);
+  });
   const completed = new Promise<void>((resolve) => {
     process.once('error', (error) => {
       session.error = error;
@@ -172,18 +226,36 @@ const startRecordingConversion = async (
       resolve();
     });
   });
-  session = { process, temporaryDirectory, outputPath, completed };
+  session = {
+    process,
+    outputPath,
+    completed,
+    recoveryPath,
+    recoveryStream,
+    recoveryCompleted,
+    fps,
+    withAudio,
+    outputWidth,
+    outputHeight,
+    mjpegQuality,
+  };
+  process.stdin?.on('error', (error) => {
+    stopLiveConversion(session, error);
+  });
   recordingConversionSessions.set(id, session);
-  return id;
+  return { canceled: false, id, filePath: outputPath };
 };
 
 const discardRecordingConversion = async (id: string): Promise<void> => {
   const conversion = recordingConversionSessions.get(id);
   if (!conversion) return;
   recordingConversionSessions.delete(id);
+  if (!conversion.recoveryStream.destroyed) conversion.recoveryStream.destroy();
   conversion.process.stdin?.destroy();
   if (conversion.process.exitCode === null) conversion.process.kill();
-  await fs.rm(conversion.temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+  await Promise.all([conversion.completed, conversion.recoveryCompleted]);
+  await fs.rm(conversion.outputPath, { force: true }).catch(() => undefined);
+  await fs.rm(conversion.recoveryPath, { force: true }).catch(() => undefined);
 };
 
 type MenuPresets = {
@@ -495,6 +567,7 @@ const createWindow = (): void => {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
     },
   });
   let allowCloseWithIncompleteRecording = false;
@@ -636,11 +709,15 @@ ipcMain.handle(
     withAudio: boolean,
     outputWidth: number,
     outputHeight: number,
-  ): Promise<string> => startRecordingConversion(
+    mjpegQuality: 1 | 3 | 5,
+    suggestedName: string,
+  ): Promise<StartRecordingConversionResult> => startRecordingConversion(
     fps === 60 ? 60 : 30,
     withAudio === true,
     Number.isFinite(outputWidth) ? Math.max(2, Math.round(outputWidth / 2) * 2) : 1920,
     Number.isFinite(outputHeight) ? Math.max(2, Math.round(outputHeight / 2) * 2) : 1080,
+    mjpegQuality === 1 || mjpegQuality === 5 ? mjpegQuality : 3,
+    suggestedName,
   ),
 );
 
@@ -649,49 +726,80 @@ ipcMain.handle(
   async (_event, id: string, bytes: Uint8Array): Promise<void> => {
     const conversion = recordingConversionSessions.get(id);
     if (!conversion) throw new Error('録画変換セッションが見つかりません。');
-    if (conversion.error) throw conversion.error;
+    const buffer = Buffer.from(bytes);
+    if (conversion.recoveryError) throw conversion.recoveryError;
+    await writeBuffer(conversion.recoveryStream, buffer);
+
+    if (conversion.error) return;
     const input = conversion.process.stdin;
     if (!input || input.destroyed || !input.writable) {
-      throw conversion.error ?? new Error('録画変換への書き込みが終了しています。');
+      stopLiveConversion(
+        conversion,
+        new Error('録画中のAVI変換が停止したため、録画終了後に復旧変換します。'),
+      );
+      return;
     }
-    const buffer = Buffer.from(bytes);
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => reject(error);
-      input.once('error', onError);
-      const finish = (): void => {
-        input.removeListener('error', onError);
-        resolve();
-      };
-      if (input.write(buffer)) finish();
-      else input.once('drain', finish);
-    });
+
+    try {
+      input.write(buffer);
+      if (input.writableLength > MAX_FFMPEG_INPUT_BUFFER_BYTES) {
+        stopLiveConversion(
+          conversion,
+          new Error('AVI変換の遅延が大きいため、録画終了後の復旧変換へ切り替えました。'),
+        );
+      }
+    } catch (error) {
+      stopLiveConversion(
+        conversion,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
   },
 );
 
 ipcMain.handle(
   'recording:conversion-finish',
-  async (_event, id: string, suggestedName: string): Promise<SaveRecordingResult> => {
+  async (_event, id: string): Promise<SaveRecordingResult> => {
     const conversion = recordingConversionSessions.get(id);
     if (!conversion) throw new Error('録画変換セッションが見つかりません。');
-    const result = await dialog.showSaveDialog({
-      title: '録画を保存',
-      defaultPath: suggestedName,
-      filters: [{ name: 'AVI video', extensions: ['avi'] }],
-    });
-    if (result.canceled || !result.filePath) {
-      await discardRecordingConversion(id);
-      return { canceled: true };
+    if (!conversion.recoveryStream.destroyed) conversion.recoveryStream.end();
+    if (!conversion.error) conversion.process.stdin?.end();
+    await Promise.all([conversion.completed, conversion.recoveryCompleted]);
+
+    if (conversion.recoveryError) {
+      recordingConversionSessions.delete(id);
+      throw new Error(
+        `録画復旧データの保存に失敗しました。\n${conversion.recoveryError.message}`,
+      );
     }
-    const filePath = result.filePath.toLowerCase().endsWith('.avi') ? result.filePath : `${result.filePath}.avi`;
-    conversion.process.stdin?.end();
-    await conversion.completed;
+
     if (conversion.error) {
-      await discardRecordingConversion(id);
-      throw conversion.error;
+      await fs.rm(conversion.outputPath, { force: true }).catch(() => undefined);
+      try {
+        await convertWebmToAvi(
+          conversion.recoveryPath,
+          conversion.outputPath,
+          conversion.fps,
+          conversion.withAudio,
+          null,
+          conversion.outputWidth,
+          conversion.outputHeight,
+          conversion.mjpegQuality,
+        );
+      } catch (recoveryError) {
+        recordingConversionSessions.delete(id);
+        const message = recoveryError instanceof Error
+          ? recoveryError.message
+          : String(recoveryError);
+        throw new Error(
+          `AVIへの復旧変換に失敗しました。圧縮済み録画素材は次の場所に残しています。\n${conversion.recoveryPath}\n\n${message}`,
+        );
+      }
     }
-    await fs.copyFile(conversion.outputPath, filePath);
-    await discardRecordingConversion(id);
-    return { canceled: false, filePath };
+
+    recordingConversionSessions.delete(id);
+    await fs.rm(conversion.recoveryPath, { force: true }).catch(() => undefined);
+    return { canceled: false, filePath: conversion.outputPath };
   },
 );
 

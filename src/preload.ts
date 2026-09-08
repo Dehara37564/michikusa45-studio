@@ -4,7 +4,7 @@ import type {
   ProjectFile,
   SaveProjectResult,
 } from './shared/project';
-import type { SaveRecordingResult } from './shared/recording';
+import type { SaveRecordingResult, StartRecordingConversionResult } from './shared/recording';
 import type { MenuCommand, MenuPreset } from './shared/menu';
 
 contextBridge.exposeInMainWorld('michikusa', {
@@ -41,13 +41,15 @@ contextBridge.exposeInMainWorld('michikusa', {
     withAudio: boolean,
     outputWidth: number,
     outputHeight: number,
-  ): Promise<string> => ipcRenderer.invoke(
-    'recording:conversion-start', fps, withAudio, outputWidth, outputHeight,
+    mjpegQuality: 1 | 3 | 5,
+    suggestedName: string,
+  ): Promise<StartRecordingConversionResult> => ipcRenderer.invoke(
+    'recording:conversion-start', fps, withAudio, outputWidth, outputHeight, mjpegQuality, suggestedName,
   ),
   writeRecordingConversion: (id: string, bytes: Uint8Array): Promise<void> =>
     ipcRenderer.invoke('recording:conversion-write', id, bytes),
-  finishRecordingConversion: (id: string, suggestedName: string): Promise<SaveRecordingResult> =>
-    ipcRenderer.invoke('recording:conversion-finish', id, suggestedName),
+  finishRecordingConversion: (id: string): Promise<SaveRecordingResult> =>
+    ipcRenderer.invoke('recording:conversion-finish', id),
   abortRecordingConversion: (id: string): Promise<void> =>
     ipcRenderer.invoke('recording:conversion-abort', id),
   saveRecording: (

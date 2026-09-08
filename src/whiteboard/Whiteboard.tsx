@@ -118,6 +118,17 @@ type RecordingUiSettings = RecordingSettings & {
   showAudioMeter: boolean;
 };
 
+type AudioFilterPresetSettings = Omit<
+  AudioFilterSettings,
+  'monitoringEnabled' | 'monitoringGainDb'
+>;
+
+type AudioFilterPreset = {
+  id: string;
+  name: string;
+  filters: AudioFilterPresetSettings;
+};
+
 type WrapNoteStroke = { points: Array<{ x: number; y: number }>; color: string; width: number };
 type EditableSelection = { kind: 'stroke' | 'image'; id: string };
 type EditableSnapshot = { strokes: Array<{ id: string; baseWidth: number; points: Point[] }>; images: Array<{ id: string; x: number; y: number; width: number; height: number }> };
@@ -136,6 +147,7 @@ const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
   quality: '1080p',
   videoBitsPerSecond: 12_000_000,
   fps: 30,
+  mjpegQuality: 3,
   audioFilters: {
     monitoringEnabled: false,
     monitoringGainDb: -12,
@@ -161,6 +173,68 @@ const DEFAULT_RECORDING_SETTINGS: RecordingUiSettings = {
   showAudioMeter: true,
 };
 
+const AUDIO_FILTER_PRESETS_STORAGE_KEY = 'audio-filter-presets';
+
+const toAudioFilterPresetSettings = (
+  filters: AudioFilterSettings,
+): AudioFilterPresetSettings => {
+  const {
+    monitoringEnabled: _monitoringEnabled,
+    monitoringGainDb: _monitoringGainDb,
+    ...processingFilters
+  } = filters;
+  return processingFilters;
+};
+
+const sanitizeAudioFilterPresetSettings = (
+  saved: unknown,
+): AudioFilterPresetSettings => {
+  const defaults = toAudioFilterPresetSettings(
+    DEFAULT_RECORDING_SETTINGS.audioFilters,
+  );
+  if (!saved || typeof saved !== 'object') return defaults;
+  const candidate = saved as Record<string, unknown>;
+  const sanitized = { ...defaults } as Record<string, boolean | number>;
+  (Object.keys(defaults) as Array<keyof AudioFilterPresetSettings>).forEach((key) => {
+    const value = candidate[key];
+    const defaultValue = defaults[key];
+    if (
+      (typeof defaultValue === 'boolean' && typeof value === 'boolean') ||
+      (typeof defaultValue === 'number' && typeof value === 'number' && Number.isFinite(value))
+    ) {
+      sanitized[key] = value;
+    }
+  });
+  return sanitized as AudioFilterPresetSettings;
+};
+
+const loadAudioFilterPresets = (): AudioFilterPreset[] => {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(AUDIO_FILTER_PRESETS_STORAGE_KEY) ?? '[]',
+    ) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((value): AudioFilterPreset[] => {
+      if (!value || typeof value !== 'object') return [];
+      const candidate = value as Record<string, unknown>;
+      if (
+        typeof candidate.id !== 'string' ||
+        typeof candidate.name !== 'string' ||
+        !candidate.name.trim()
+      ) {
+        return [];
+      }
+      return [{
+        id: candidate.id,
+        name: candidate.name.trim(),
+        filters: sanitizeAudioFilterPresetSettings(candidate.filters),
+      }];
+    });
+  } catch {
+    return [];
+  }
+};
+
 const AUDIO_METER_FLOOR_DBFS = -60;
 const AUDIO_METER_OPTIMAL_MIN_DBFS = -18;
 const AUDIO_METER_HIGH_MIN_DBFS = -6;
@@ -171,6 +245,9 @@ const mergeRecordingSettings = (saved: unknown): RecordingUiSettings => {
   return {
     ...DEFAULT_RECORDING_SETTINGS,
     ...partial,
+    mjpegQuality: partial.mjpegQuality === 1 || partial.mjpegQuality === 5
+      ? partial.mjpegQuality
+      : 3,
     audioFilters: {
       ...DEFAULT_RECORDING_SETTINGS.audioFilters,
       ...(partial.audioFilters ?? {}),
@@ -521,6 +598,10 @@ export function Whiteboard(): React.JSX.Element {
   const [audioPeakDbfs, setAudioPeakDbfs] = useState(AUDIO_METER_FLOOR_DBFS);
   const [audioMonitorActive, setAudioMonitorActive] = useState(false);
   const audioMonitorRef = useRef<AudioLevelMonitor | null>(null);
+  const [audioFilterPresets, setAudioFilterPresets] =
+    useState<AudioFilterPreset[]>(loadAudioFilterPresets);
+  const [selectedAudioFilterPresetId, setSelectedAudioFilterPresetId] =
+    useState('');
   const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [showReviewSummary, setShowReviewSummary] = useState(false);
   const [showWrapSummary, setShowWrapSummary] = useState(false);
@@ -639,6 +720,72 @@ export function Whiteboard(): React.JSX.Element {
       JSON.stringify(recordingSettings),
     );
   }, [recordingSettings]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      AUDIO_FILTER_PRESETS_STORAGE_KEY,
+      JSON.stringify(audioFilterPresets),
+    );
+  }, [audioFilterPresets]);
+
+  const applyAudioFilterPreset = (presetId: string): void => {
+    setSelectedAudioFilterPresetId(presetId);
+    const preset = audioFilterPresets.find((candidate) => candidate.id === presetId);
+    if (!preset) return;
+    setRecordingSettings((settings) => ({
+      ...settings,
+      audioFilters: {
+        ...settings.audioFilters,
+        ...preset.filters,
+      },
+    }));
+    setStatusMessage(`音声プリセット「${preset.name}」を適用しました`);
+  };
+
+  const saveAudioFilterPreset = (): void => {
+    const selectedPreset = audioFilterPresets.find(
+      (preset) => preset.id === selectedAudioFilterPresetId,
+    );
+    const enteredName = window.prompt(
+      '音声フィルタープリセット名',
+      selectedPreset?.name ?? '',
+    );
+    if (enteredName === null) return;
+    const name = enteredName.trim().slice(0, 40);
+    if (!name) {
+      window.alert('プリセット名を入力してください。');
+      return;
+    }
+
+    const duplicate = audioFilterPresets.find(
+      (preset) => preset.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+    );
+    const id = duplicate?.id ?? selectedPreset?.id ?? makeId();
+    const nextPreset: AudioFilterPreset = {
+      id,
+      name,
+      filters: toAudioFilterPresetSettings(recordingSettings.audioFilters),
+    };
+    setAudioFilterPresets((presets) => {
+      const existingIndex = presets.findIndex((preset) => preset.id === id);
+      if (existingIndex < 0) return [...presets, nextPreset];
+      return presets.map((preset, index) => index === existingIndex ? nextPreset : preset);
+    });
+    setSelectedAudioFilterPresetId(id);
+    setStatusMessage(`音声プリセット「${name}」を登録しました`);
+  };
+
+  const deleteSelectedAudioFilterPreset = (): void => {
+    const selectedPreset = audioFilterPresets.find(
+      (preset) => preset.id === selectedAudioFilterPresetId,
+    );
+    if (!selectedPreset) return;
+    setAudioFilterPresets((presets) => presets.filter(
+      (preset) => preset.id !== selectedPreset.id,
+    ));
+    setSelectedAudioFilterPresetId('');
+    setStatusMessage(`音声プリセット「${selectedPreset.name}」を削除しました`);
+  };
 
   useEffect(() => {
     void refreshAudioDevices();
@@ -1185,8 +1332,36 @@ export function Whiteboard(): React.JSX.Element {
     if (!canvas || recordingState !== 'idle') return;
 
     try {
-      stopAudioMonitor();
+      setRecordingState('requesting-permission');
       setShowRecordingSettings(false);
+      const now = new Date();
+      const stamp = [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, '0'),
+        String(now.getDate()).padStart(2, '0'),
+        '-',
+        String(now.getHours()).padStart(2, '0'),
+        String(now.getMinutes()).padStart(2, '0'),
+        String(now.getSeconds()).padStart(2, '0'),
+      ].join('');
+      const [outputWidth, outputHeight] = getRecordingDimensions(recordingSettings.quality);
+      const conversion = await window.michikusa.startRecordingConversion(
+        recordingSettings.fps,
+        recordingSettings.microphoneEnabled,
+        outputWidth,
+        outputHeight,
+        recordingSettings.mjpegQuality,
+        `道草45-${stamp}.avi`,
+      );
+      if (conversion.canceled) {
+        setRecordingState('idle');
+        setStatusMessage('録画をキャンセルしました');
+        return;
+      }
+      const conversionId = conversion.id;
+      recordingConversionIdRef.current = conversionId;
+      recordingChunkWriteRef.current = Promise.resolve();
+      stopAudioMonitor();
       recordingWasFullScreenRef.current = await window.michikusa.isFullScreen();
       setRecordingViewportActive(true);
       if (!recordingWasFullScreenRef.current) {
@@ -1197,15 +1372,6 @@ export function Whiteboard(): React.JSX.Element {
         requestAnimationFrame(() => resolve()),
       ));
       window.dispatchEvent(new CustomEvent('michikusa-resize-canvas'));
-      const [outputWidth, outputHeight] = getRecordingDimensions(recordingSettings.quality);
-      const conversionId = await window.michikusa.startRecordingConversion(
-        recordingSettings.fps,
-        recordingSettings.microphoneEnabled,
-        outputWidth,
-        outputHeight,
-      );
-      recordingConversionIdRef.current = conversionId;
-      recordingChunkWriteRef.current = Promise.resolve();
       const manager = new RecordingManager(canvas, {
         onStateChange: setRecordingState,
         onElapsedChange: setRecordingElapsed,
@@ -1235,6 +1401,7 @@ export function Whiteboard(): React.JSX.Element {
       if (!recordingWasFullScreenRef.current) {
         await window.michikusa.setFullScreen(false);
       }
+      setRecordingState('idle');
       const message = error instanceof Error ? error.message : String(error);
       window.alert(
         `録画を開始できませんでした。\nマイクの使用許可と接続を確認してください。\n\n${message}`,
@@ -1265,21 +1432,7 @@ export function Whiteboard(): React.JSX.Element {
       await recordingChunkWriteRef.current;
       const conversionId = recordingConversionIdRef.current;
       if (!conversionId) throw new Error('録画変換セッションが見つかりません。');
-      const now = new Date();
-      const stamp = [
-        now.getFullYear(),
-        String(now.getMonth() + 1).padStart(2, '0'),
-        String(now.getDate()).padStart(2, '0'),
-        '-',
-        String(now.getHours()).padStart(2, '0'),
-        String(now.getMinutes()).padStart(2, '0'),
-        String(now.getSeconds()).padStart(2, '0'),
-      ].join('');
-
-      const saveResult = await window.michikusa.finishRecordingConversion(
-        conversionId,
-        `道草45-${stamp}.avi`,
-      );
+      const saveResult = await window.michikusa.finishRecordingConversion(conversionId);
       recordingConversionIdRef.current = null;
 
       if (saveResult.canceled) {
@@ -1829,6 +1982,7 @@ export function Whiteboard(): React.JSX.Element {
       }
       drawReviewOverlay();
       context.restore();
+      recordingManagerRef.current?.markVideoFrameDirty();
     };
 
     const resize = (): void => {
@@ -1920,6 +2074,40 @@ export function Whiteboard(): React.JSX.Element {
       if (distanceScreen < MIN_POINT_DISTANCE_SCREEN) return;
 
       stroke.points.push(smoothIncomingPoint(previous, incoming, zoom));
+    };
+
+    const appendFinalPointerPoint = (
+      stroke: Stroke,
+      pointerEvent: PointerEvent,
+    ): void => {
+      const coalescedEvents = pointerEvent.getCoalescedEvents?.() ?? [];
+      for (const coalesced of coalescedEvents) {
+        if (coalesced.pointerType !== 'pen' || coalesced.pressure > 0) {
+          appendPointerPoint(stroke, coalesced);
+        }
+      }
+
+      const position = pointerPosition(pointerEvent);
+      const finalPoint = screenToWorld(position.x, position.y);
+      const previous = stroke.points[stroke.points.length - 1];
+      finalPoint.pressure = pointerEvent.pointerType === 'pen'
+        ? pointerEvent.pressure > 0
+          ? pointerEvent.pressure
+          : previous?.pressure ?? 0.5
+        : 1;
+
+      if (!previous) {
+        stroke.points.push(finalPoint);
+        return;
+      }
+
+      const distanceScreen = Math.hypot(
+        finalPoint.x - previous.x,
+        finalPoint.y - previous.y,
+      ) * cameraRef.current.zoom;
+      if (distanceScreen >= MIN_POINT_DISTANCE_SCREEN) {
+        stroke.points.push(finalPoint);
+      }
     };
 
     const eraseAt = (world: Point): void => {
@@ -2216,6 +2404,8 @@ export function Whiteboard(): React.JSX.Element {
       const stroke = activeStrokeRef.current;
       if (!stroke) return;
 
+      if (event.type === 'pointerup') appendFinalPointerPoint(stroke, event);
+
       if (stroke.points.length === 1) {
         stroke.points.push({
           ...stroke.points[0],
@@ -2229,6 +2419,7 @@ export function Whiteboard(): React.JSX.Element {
       markDirty();
       requestHistoryRefresh();
       redraw();
+      recordingManagerRef.current?.requestVideoFrame();
     };
 
     const zoomAtScreenPoint = (
@@ -3003,6 +3194,27 @@ export function Whiteboard(): React.JSX.Element {
                   {audioMonitorActive ? 'モニター停止' : 'レベルモニター'}
                 </button>
               </div>
+              <div className="audio-filter-presets">
+                <select
+                  aria-label="音声フィルタープリセット"
+                  value={selectedAudioFilterPresetId}
+                  onChange={(event) => applyAudioFilterPreset(event.target.value)}
+                >
+                  <option value="">プリセットを選択</option>
+                  {audioFilterPresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.name}</option>
+                  ))}
+                </select>
+                <button type="button" onClick={saveAudioFilterPreset}>登録</button>
+                <button
+                  type="button"
+                  className="audio-filter-preset-delete"
+                  disabled={!selectedAudioFilterPresetId}
+                  onClick={deleteSelectedAudioFilterPreset}
+                >
+                  削除
+                </button>
+              </div>
               <div className="audio-monitor-readout">
                 <div className="audio-monitor-axis-title">レベル（dBFS）</div>
                 <div className="audio-monitor-scale"><span style={{ left: '0%' }}>-60</span><span style={{ left: '50%' }}>-30</span><span style={{ left: '70%' }}>-18</span><span style={{ left: '80%' }}>-12</span><span style={{ left: '90%' }}>-6</span><span style={{ left: '100%' }}>0</span></div>
@@ -3016,7 +3228,10 @@ export function Whiteboard(): React.JSX.Element {
               </div>
               <AudioFilterControls
                 filters={recordingSettings.audioFilters}
-                onChange={(audioFilters) => setRecordingSettings((settings) => ({ ...settings, audioFilters }))}
+                onChange={(audioFilters) => {
+                  setSelectedAudioFilterPresetId('');
+                  setRecordingSettings((settings) => ({ ...settings, audioFilters }));
+                }}
               />
             </section>
             <label>
@@ -3038,6 +3253,14 @@ export function Whiteboard(): React.JSX.Element {
                 <option value={24_000_000}>24 Mbps</option>
                 <option value={45_000_000}>45 Mbps</option>
                 <option value={68_000_000}>68 Mbps</option>
+              </select>
+            </label>
+            <label>
+              <span>AVI画質</span>
+              <select value={recordingSettings.mjpegQuality} onChange={(event) => setRecordingSettings((settings) => ({ ...settings, mjpegQuality: Number(event.target.value) as 1 | 3 | 5 }))}>
+                <option value={1}>最高画質（大容量）</option>
+                <option value={3}>標準（推奨）</option>
+                <option value={5}>軽量</option>
               </select>
             </label>
             <label>
