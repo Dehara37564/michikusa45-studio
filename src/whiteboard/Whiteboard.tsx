@@ -364,6 +364,91 @@ const hsvToRgb = (h: number, s: number, v: number): { r: number; g: number; b: n
   return { r: (red + match) * 255, g: (green + match) * 255, b: (blue + match) * 255 };
 };
 
+type HsvColorWheelProps = {
+  color: string;
+  ariaLabel: string;
+  onChange: (color: string) => void;
+};
+
+function HsvColorWheel({ color, ariaLabel, onChange }: HsvColorWheelProps): React.JSX.Element {
+  const rgb = hexToRgb(color);
+  const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+  const [hue, setHue] = useState(hsv.h);
+
+  useEffect(() => {
+    if (hsv.s > 0.01 && hsv.v > 0.01) setHue(hsv.h);
+  }, [color, hsv.h, hsv.s, hsv.v]);
+
+  const applyHue = (nextHue: number): void => {
+    const normalizedHue = (nextHue + 360) % 360;
+    setHue(normalizedHue);
+    const visibleSaturation = hsv.s < 0.05 ? 1 : hsv.s;
+    const visibleBrightness = hsv.v < 0.2 ? 0.65 : hsv.v;
+    const next = hsvToRgb(normalizedHue, visibleSaturation, visibleBrightness);
+    onChange(rgbToHex(next.r, next.g, next.b));
+  };
+
+  const updateHueFromPointer = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX);
+    // The conic gradient starts at the left edge and advances clockwise.
+    applyHue(angle * 180 / Math.PI - 180);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const updateSaturationValue = (event: React.PointerEvent<HTMLDivElement>): void => {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const saturation = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    const brightness = 1 - clamp((event.clientY - rect.top) / rect.height, 0, 1);
+    const next = hsvToRgb(hue, saturation, brightness);
+    onChange(rgbToHex(next.r, next.g, next.b));
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const markerAngle = (hue + 180) * Math.PI / 180;
+  const hueMarkerStyle: React.CSSProperties = {
+    left: `${50 + Math.cos(markerAngle) * 44}%`,
+    top: `${50 + Math.sin(markerAngle) * 44}%`,
+    backgroundColor: `hsl(${hue} 100% 50%)`,
+  };
+
+  return <div
+    className="hsv-color-wheel"
+    role="slider"
+    tabIndex={0}
+    aria-label={ariaLabel}
+    aria-valuemin={0}
+    aria-valuemax={359}
+    aria-valuenow={Math.round(hue)}
+    onPointerDown={updateHueFromPointer}
+    onPointerMove={(event) => {
+      if ((event.buttons & 1) === 1) updateHueFromPointer(event);
+    }}
+    onKeyDown={(event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      applyHue(hue + (event.key === 'ArrowRight' ? 1 : -1));
+    }}
+  >
+    <span className="hsv-hue-marker" style={hueMarkerStyle} />
+    <div className="hsv-color-wheel-center" onPointerDown={(event) => event.stopPropagation()}>
+      <div
+        className="hsv-saturation-value"
+        style={{ backgroundColor: `hsl(${hue} 100% 50%)` }}
+        onPointerDown={updateSaturationValue}
+        onPointerMove={(event) => {
+          if ((event.buttons & 1) === 1) updateSaturationValue(event);
+        }}
+      >
+        <span style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
+      </div>
+    </div>
+  </div>;
+}
+
 const makeId = (): string =>
   `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -1197,17 +1282,6 @@ export function Whiteboard(): React.JSX.Element {
     const parsed = Number(backgroundSpacingDraft.trim().replace(',', '.'));
     if (Number.isFinite(parsed)) changeBackgroundSpacing(parsed);
     setIsBackgroundSpacingEditing(false);
-  };
-
-  const updateColorFromPalette = (event: React.PointerEvent<HTMLDivElement>): void => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const saturation = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-    const brightness = 1 - clamp((event.clientY - rect.top) / rect.height, 0, 1);
-    const { h } = rgbToHsv(...Object.values(hexToRgb(color)) as [number, number, number]);
-    const next = hsvToRgb(h, saturation, brightness);
-    setColor(rgbToHex(next.r, next.g, next.b));
-    markDirty();
-    event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const startEyedropper = (target: { kind: 'pen' } | { kind: 'stamp'; definitionId: string }): void => {
@@ -2942,42 +3016,21 @@ export function Whiteboard(): React.JSX.Element {
               <span className="color-picker-trigger-swatch" style={{ backgroundColor: color }} />
             </button>
             {openMenu === 'color-picker' && <div className="color-picker-popover">
-              {(() => {
-                const rgb = hexToRgb(color);
-                const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
-                return <>
-                  <div
-                    className="saturation-value-picker"
-                    style={{ backgroundColor: `hsl(${hsv.h} 100% 50%)` }}
-                    onPointerDown={updateColorFromPalette}
-                    onPointerMove={(event) => {
-                      if (event.buttons === 1) updateColorFromPalette(event);
-                    }}
-                  >
-                    <span style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
-                  </div>
-                  <div className="hue-picker-row">
-                    <button type="button" className="eyedropper-icon" title="スポイト" aria-label="スポイト" onClick={() => startEyedropper({ kind: 'pen' })}>
-                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.4 3.2 1.4 1.4a2 2 0 0 1 0 2.8l-3.1 3.1 1.1 1.1-1.9 1.9-1.1-1.1-7.7 7.7-4.2.7.7-4.2 7.7-7.7-1.1-1.1 1.9-1.9 1.1 1.1 3.1-3.1a2 2 0 0 1 2.8 0ZM6.4 17.5l-.3 1.4 1.4-.3 7-7-1.1-1.1Z" /></svg>
-                    </button>
-                    <span className="current-color-preview" style={{ backgroundColor: color }} title="キャンバスを右クリックして色を取得" />
-                    <input
-                      className="hue-slider"
-                      type="range"
-                      min="0"
-                      max="359"
-                      value={Math.round(hsv.h)}
-                      onChange={(event) => {
-                        const next = hsvToRgb(Number(event.target.value), hsv.s, hsv.v);
-                        setColor(rgbToHex(next.r, next.g, next.b));
-                        markDirty();
-                      }}
-                      aria-label="色相"
-                      style={{ '--selected-hue-color': `hsl(${hsv.h} 100% 50%)` } as React.CSSProperties}
-                    />
-                  </div>
-                </>;
-              })()}
+              <HsvColorWheel
+                color={color}
+                ariaLabel="ペンの色相"
+                onChange={(nextColor) => {
+                  setColor(nextColor);
+                  markDirty();
+                }}
+              />
+              <div className="color-picker-actions">
+                <button type="button" className="eyedropper-icon" title="スポイト" aria-label="スポイト" onClick={() => startEyedropper({ kind: 'pen' })}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.4 3.2 1.4 1.4a2 2 0 0 1 0 2.8l-3.1 3.1 1.1 1.1-1.9 1.9-1.1-1.1-7.7 7.7-4.2.7.7-4.2 7.7-7.7-1.1-1.1 1.9-1.9 1.1 1.1 3.1-3.1a2 2 0 0 1 2.8 0ZM6.4 17.5l-.3 1.4 1.4-.3 7-7-1.1-1.1Z" /></svg>
+                </button>
+                <span className="current-color-preview" style={{ backgroundColor: color }} title="現在の色" />
+                <output>{color.toUpperCase()}</output>
+              </div>
               <div className="color-preset-heading">プリセット</div>
               <div className="color-preset-grid">
                 {colorPresets.map((preset) => <button
@@ -3068,28 +3121,19 @@ export function Whiteboard(): React.JSX.Element {
               <span className="color-picker-trigger-swatch" style={{ backgroundColor: selectedStampDefinition?.color ?? '#000000' }} />
             </button>
             {openMenu === 'stamp-color-picker' && selectedStampDefinition && <div className="color-picker-popover">
-              {(() => {
-                const stampColor = selectedStampDefinition.color;
-                const rgb = hexToRgb(stampColor);
-                const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
-                const applyColor = (nextColor: string): void => updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, color: nextColor } : definition) }));
-                const applyHsv = (h: number, s: number, v: number): void => { const next = hsvToRgb(h, s, v); applyColor(rgbToHex(next.r, next.g, next.b)); };
-                const updatePalette = (event: React.PointerEvent<HTMLDivElement>): void => {
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  applyHsv(hsv.h, clamp((event.clientX - rect.left) / rect.width, 0, 1), 1 - clamp((event.clientY - rect.top) / rect.height, 0, 1));
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                };
-                return <>
-                  <div className="saturation-value-picker" style={{ backgroundColor: `hsl(${hsv.h} 100% 50%)` }} onPointerDown={updatePalette} onPointerMove={(event) => { if (event.buttons === 1) updatePalette(event); }}>
-                    <span style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
-                  </div>
-                  <div className="hue-picker-row stamp-hue-picker-row">
-                    <button type="button" className="eyedropper-icon" title="スポイト" aria-label="スポイト" onClick={() => startEyedropper({ kind: 'stamp', definitionId: selectedStampDefinition.id })}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.4 3.2 1.4 1.4a2 2 0 0 1 0 2.8l-3.1 3.1 1.1 1.1-1.9 1.9-1.1-1.1-7.7 7.7-4.2.7.7-4.2 7.7-7.7-1.1-1.1 1.9-1.9 1.1 1.1 3.1-3.1a2 2 0 0 1 2.8 0ZM6.4 17.5l-.3 1.4 1.4-.3 7-7-1.1-1.1Z" /></svg></button>
-                    <span className="current-color-preview" style={{ backgroundColor: stampColor }} />
-                    <input className="hue-slider" type="range" min="0" max="359" value={Math.round(hsv.h)} onChange={(event) => applyHsv(Number(event.target.value), hsv.s, hsv.v)} aria-label="スタンプの色相" style={{ '--selected-hue-color': `hsl(${hsv.h} 100% 50%)` } as React.CSSProperties} />
-                  </div>
-                </>;
-              })()}
+              <HsvColorWheel
+                color={selectedStampDefinition.color}
+                ariaLabel="スタンプの色相"
+                onChange={(nextColor) => updateReview((current) => ({
+                  ...current,
+                  stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, color: nextColor } : definition),
+                }))}
+              />
+              <div className="color-picker-actions">
+                <button type="button" className="eyedropper-icon" title="スポイト" aria-label="スポイト" onClick={() => startEyedropper({ kind: 'stamp', definitionId: selectedStampDefinition.id })}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.4 3.2 1.4 1.4a2 2 0 0 1 0 2.8l-3.1 3.1 1.1 1.1-1.9 1.9-1.1-1.1-7.7 7.7-4.2.7.7-4.2 7.7-7.7-1.1-1.1 1.9-1.9 1.1 1.1 3.1-3.1a2 2 0 0 1 2.8 0ZM6.4 17.5l-.3 1.4 1.4-.3 7-7-1.1-1.1Z" /></svg></button>
+                <span className="current-color-preview" style={{ backgroundColor: selectedStampDefinition.color }} title="現在の色" />
+                <output>{selectedStampDefinition.color.toUpperCase()}</output>
+              </div>
               <div className="color-preset-heading">プリセット</div>
               <div className="color-preset-grid">{colorPresets.map((preset) => <button type="button" key={preset} className={`color-preset-swatch${preset.toLowerCase() === selectedStampDefinition.color.toLowerCase() ? ' selected' : ''}`} style={{ backgroundColor: preset }} onClick={() => { updateReview((current) => ({ ...current, stampDefinitions: current.stampDefinitions.map((definition) => definition.id === selectedStampDefinition.id ? { ...definition, color: preset } : definition) })); setOpenMenu(null); }} aria-label="プリセット色" />)}</div>
               <button type="button" className="register-current-color" onClick={() => void window.michikusa.addMenuPreset({ type: 'color', value: selectedStampDefinition.color }).then(refreshMenuPresets)}>現在の色を登録</button>

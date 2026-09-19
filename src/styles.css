@@ -394,7 +394,7 @@ button:disabled {
   z-index: 35;
   top: calc(100% + 8px);
   left: 0;
-  width: 368px;
+  width: 320px;
   display: grid;
   gap: 7px;
   padding: 10px;
@@ -402,6 +402,85 @@ button:disabled {
   border-radius: 10px;
   background: #ffffff;
   box-shadow: var(--shadow-panel);
+}
+
+.hsv-color-wheel {
+  position: relative;
+  width: 280px;
+  height: 280px;
+  margin: 0 auto 3px;
+  border: 1px solid rgba(32, 33, 36, .55);
+  border-radius: 50%;
+  outline: none;
+  background: conic-gradient(from -90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .25);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.hsv-color-wheel:focus-visible {
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, .28), inset 0 0 0 1px rgba(255, 255, 255, .25);
+}
+
+.hsv-hue-marker {
+  position: absolute;
+  z-index: 3;
+  width: 15px;
+  height: 24px;
+  border: 3px solid #fff;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px #202124, 0 1px 3px rgba(0, 0, 0, .45);
+  transform: translate(-50%, -50%) rotate(0deg);
+  pointer-events: none;
+}
+
+.hsv-color-wheel-center {
+  position: absolute;
+  inset: 29px;
+  display: grid;
+  border-radius: 50%;
+  background: #fff;
+  place-items: center;
+}
+
+.hsv-saturation-value {
+  position: relative;
+  /* An inscribed square has a side length of inner diameter / sqrt(2). */
+  box-sizing: border-box;
+  width: 70.710678%;
+  height: 70.710678%;
+  overflow: hidden;
+  border: 1px solid rgba(32, 33, 36, .65);
+  background-image:
+    linear-gradient(to bottom, transparent, #000),
+    linear-gradient(to right, #fff, transparent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .22);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.hsv-saturation-value > span {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #202733, 0 1px 3px rgba(0, 0, 0, .4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.color-picker-actions {
+  display: grid;
+  grid-template-columns: 20px 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.color-picker-actions output {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .saturation-value-picker {
